@@ -26,14 +26,15 @@ void list_add_node(list_t *l, char c);
 
 /*
  * Reads a complete word from the list of characters
- * @l: list to extract the word from
+ * @l: reference to the list containing the word to extract
  */
-char *get_w(list_t l);
+char *get_w(list_t *l);
 
 /*
  * Frees the whole memory used up by the provided list
  * @l: list to be freed
+ * @n: number of elements to free
  */
-void list_free(list_t *l);
+void list_free(list_t *l, int n);
 
 #endif

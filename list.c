@@ -1,11 +1,11 @@
 #include "list.h"
 
 // TODO: Handle mem cleanup
-char *get_w(list_t l) {
+char *get_w(list_t *l) {
   const void *mlc_jump_table[2] = {&&gw_mlc_success, &&gw_mlc_failure};
 
-  list_node_t *curr = l.head;
-  int size = l.elem;
+  list_node_t *curr = l->head;
+  int size = l->elem;
 
   char *word = malloc((size + 1) * sizeof(char));
 
@@ -63,7 +63,7 @@ lan_end:
   l->elem++;
 }
 
-void list_free(list_t *l) {
+void list_free(list_t *l, int n) {
   list_node_t *curr = l->head;
 
   while (curr != NULL) {
@@ -76,7 +76,7 @@ void list_free(list_t *l) {
   l->elem = 0;
 }
 
-int main(int argc, char **argv) {
+/* int main(int argc, char **argv) {
   if (argc < 2) {
     printf("Usage: %s <word1> .. <wordN>\n", argv[0]);
     exit(1);
@@ -97,4 +97,4 @@ int main(int argc, char **argv) {
 
     list_free(&word); // free list nodes
   }
-}
+} */
