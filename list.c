@@ -89,12 +89,12 @@ void list_free(list_t *l, int n) {
       list_add_node(&word, argv[word_i][i]); // <-- FIXED index
     }
 
-    char *w = get_w(word);
+    char *w = get_w(&word);
     if (w) {
       printf("%s\n", w);
       free(w); // free string
     }
 
-    list_free(&word); // free list nodes
+    list_free(&word, word.elem); // free list nodes
   }
 } */

@@ -20,11 +20,9 @@ char **parse_csv(FILE *fp, char d, char q, char nl) {
    * table.
    *
    * */
-  const void *jump_table_parser_fsm[5] = {&&parse_token, &&parse_delimiter,
-                                          &&parse_qualifier, NULL,
-                                          &&parse_new_line};
-  const void *jump_table_qualifier[2] = {&&parse_not_in_qualifier,
-                                         &&parser_loop_start};
+  const void *jt_parser_fsm[5] = {&&parse_token, &&parse_qualifier,
+                                  &&parse_delimiter, NULL, &&parse_new_line};
+  const void *jt_qualifier[2] = {&&parser_loop_start, &&parse_update_status};
 
   char **parsed_values;
   char token = 0;
@@ -44,16 +42,14 @@ parser_loop_start:
     goto parser_loop_end;
   }
 
-  is_delimiter = !(token ^ d);
-  is_qualifier = (!(token ^ q) << 1) * in_qualifier;
-  is_endofline = !(token ^ nl) << 2;
+  is_qualifier = !(token ^ q) | in_qualifier;
+  is_delimiter = (!(token ^ d)) << 1;
+  is_endofline = (!(token ^ nl)) << 2;
 
   printf("%c", token * !(is_delimiter) * !(in_qualifier) * !(is_qualifier));
 
-  goto *jump_table_qualifier[in_qualifier * is_qualifier];
-
 parse_not_in_qualifier:
-  goto *jump_table_parser_fsm[(is_delimiter + is_qualifier + is_endofline)];
+  goto *jt_parser_fsm[(is_delimiter | is_qualifier | is_endofline)];
 
 parse_token:
   list_add_node(&curr_word, token);
