@@ -2,12 +2,15 @@ CC = gcc
 CFLAGS = -I include -pthread
 SRC = src/parser.c src/list.c
 
-.PHONY: all clean bench test report
+.PHONY: all clean bench test report csv
 
 all: parser
 
 parser: $(SRC) include/list.h
 	$(CC) $(CFLAGS) -o $@ $(SRC)
+
+csv:
+	python3 bench/gen_csv.py csv/
 
 test:
 	bash tests/run_tests.sh

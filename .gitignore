@@ -2,3 +2,5 @@
 *.csv
 *.out
 *.o
+parser
+parser_bench

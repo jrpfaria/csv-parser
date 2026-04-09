@@ -22,6 +22,9 @@ def gen_csv(rows, cols, filename, quoted_pct=0.1):
             f.write(','.join(fields) + '\n')
 
 if __name__ == '__main__':
+    import os
+    outdir = sys.argv[1] if len(sys.argv) > 1 else '.'
+    os.makedirs(outdir, exist_ok=True)
     configs = [
         (100,    5,  'bench_100.csv'),
         (1000,   10, 'bench_1k.csv'),
@@ -30,5 +33,6 @@ if __name__ == '__main__':
     ]
     random.seed(42)
     for rows, cols, name in configs:
-        gen_csv(rows, cols, name)
+        path = os.path.join(outdir, name)
+        gen_csv(rows, cols, path)
         print(f'{name}: {rows} rows x {cols} cols')
