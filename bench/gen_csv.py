@@ -4,9 +4,9 @@ import sys
 import random
 import string
 
-def rand_word(min_len=1, max_len=12):
+def rand_word(min_len=4, max_len=32):
     length = random.randint(min_len, max_len)
-    return ''.join(random.choices(string.ascii_lowercase, k=length))
+    return ''.join(random.choices(string.ascii_lowercase + string.digits + ' ', k=length))
 
 def gen_csv(rows, cols, filename, quoted_pct=0.1):
     with open(filename, 'w') as f:

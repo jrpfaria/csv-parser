@@ -7,7 +7,7 @@
 
 /* Configurable limits — tune for your target */
 #define MAX_WORD_LEN 256
-#define ARENA_SIZE (4 * 1024 * 1024) /* 4 MB per worker */
+#define ARENA_SIZE (32 * 1024 * 1024) /* 32 MB per worker */
 #define MAX_COLS 64
 #define MAX_ROWS (256 * 1024) /* 256K rows total */
 #define MAX_WORKERS 8

@@ -1,6 +1,5 @@
 #!/bin/bash
 # Test suite: validates parse accuracy across all 3 modes
-set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -19,7 +18,7 @@ run_test() {
     local expected_file="$4"
     TOTAL=$((TOTAL + 1))
 
-    actual=$(./test_parser "$csv_file" "$workers" 2>&1 | sed -n '/^Parsed Values/,/^$/p' | grep -v '^$' | grep -v '^Parsed Values' | grep -v '^\-\-\- Timing')
+    actual=$(./test_parser "$csv_file" "$workers" 2>&1 | sed -n '/^  row /p')
     expected=$(cat "$expected_file")
 
     if [ "$actual" = "$expected" ]; then
@@ -29,6 +28,24 @@ run_test() {
         printf "  FAIL: %s\n" "$name"
         printf "    expected:\n%s\n" "$expected"
         printf "    actual:\n%s\n" "$actual"
+        FAIL=$((FAIL + 1))
+    fi
+}
+
+# Crash test: just checks exit code 0 (no segfault / signal death)
+run_crash_test() {
+    local name="$1"
+    local csv_file="$2"
+    local workers="$3"
+    TOTAL=$((TOTAL + 1))
+
+    ./test_parser "$csv_file" "$workers" >/dev/null 2>&1
+    local rc=$?
+    if [ "$rc" = "0" ]; then
+        printf "  PASS: %s (no crash)\n" "$name"
+        PASS=$((PASS + 1))
+    else
+        printf "  FAIL: %s (exit code %d)\n" "$name" "$rc"
         FAIL=$((FAIL + 1))
     fi
 }
@@ -127,13 +144,75 @@ EOF
 python3 "$ROOT_DIR/bench/gen_csv.py" 2>/dev/null
 # gen_csv creates bench_1k.csv with 1000 rows x 10 cols
 
+# =============================================
+# Bad / malformed CSV tests (graceful handling)
+# =============================================
+
+# --- Bad 1: empty file ---
+: > test_bad_empty.csv
+
+# --- Bad 2: just a newline ---
+printf "\n" > test_bad_newline_only.csv
+
+# --- Bad 3: only delimiters ---
+printf ",,,,\n,,,,\n" > test_bad_delimiters.csv
+
+python3 -c "
+lines = [
+    '  row 0 (5 cols):     ',
+    '  row 1 (5 cols):     ',
+]
+with open('expected_bad_delimiters.txt', 'w') as f:
+    f.write('\n'.join(lines) + '\n')
+"
+
+# --- Bad 4: consecutive newlines (blank rows) ---
+printf "a,b\n\n\nc,d\n" > test_bad_blank_rows.csv
+
+python3 -c "
+lines = [
+    '  row 0 (2 cols): a b',
+    '  row 1 (1 cols): ',
+    '  row 2 (1 cols): ',
+    '  row 3 (2 cols): c d',
+]
+with open('expected_bad_blank_rows.txt', 'w') as f:
+    f.write('\n'.join(lines) + '\n')
+"
+
+# --- Bad 5: unclosed qualifier (never-terminated quote) ---
+printf '"hello,world\na,b\n' > test_bad_unclosed_q.csv
+
+# --- Bad 6: word exceeding MAX_WORD_LEN (256) ---
+python3 -c "print('a' * 500 + ',b')" > test_bad_longword.csv
+
+# --- Bad 7: more columns than MAX_COLS (64) ---
+python3 -c "print(','.join(['x'] * 100))" > test_bad_manycols.csv
+
+# --- Bad 8: single character, no newline ---
+printf "x" > test_bad_single_char.csv
+
+cat > expected_bad_single_char.txt << 'EOF'
+  row 0 (1 cols): x
+EOF
+
+# --- Bad 9: binary garbage (non-text data) ---
+python3 -c "
+import sys
+sys.stdout.buffer.write(bytes(range(256)) + b'\n')
+sys.stdout.buffer.write(b'a,b,c\n')
+" > test_bad_binary.csv
+
+# --- Bad 10: very long row (thousands of columns) ---
+python3 -c "print(','.join(str(i) for i in range(500)))" > test_bad_500cols.csv
+
 echo ""
 echo "=== Running tests (all modes) ==="
 
-for mode_workers in 1 2 4; do
+for mode_workers in 1 2 4 6 8; do
     mode_name="single"
     [ "$mode_workers" = "2" ] && mode_name="dist-as-worker"
-    [ "$mode_workers" = "4" ] && mode_name="dist+slaves"
+    [ "$mode_workers" -ge "3" ] && mode_name="dist+slaves($mode_workers)"
     printf "\n--- Mode: %s (workers=%d) ---\n" "$mode_name" "$mode_workers"
 
     run_test "simple CSV"           test_simple.csv      "$mode_workers" expected_simple.txt
@@ -143,12 +222,24 @@ for mode_workers in 1 2 4; do
     run_test "empty fields"         test_empty.csv       "$mode_workers" expected_empty.txt
     run_test "ragged rows"          test_ragged.csv      "$mode_workers" expected_ragged.txt
     run_test "original test.csv"    test_original.csv    "$mode_workers" expected_original.txt
+
+    # --- Bad CSV tests ---
+    run_crash_test "empty file"           test_bad_empty.csv       "$mode_workers"
+    run_crash_test "newline only"         test_bad_newline_only.csv "$mode_workers"
+    run_test       "only delimiters"      test_bad_delimiters.csv  "$mode_workers" expected_bad_delimiters.txt
+    run_test       "blank rows"           test_bad_blank_rows.csv  "$mode_workers" expected_bad_blank_rows.txt
+    run_crash_test "unclosed qualifier"   test_bad_unclosed_q.csv  "$mode_workers"
+    run_crash_test "word > MAX_WORD_LEN"  test_bad_longword.csv    "$mode_workers"
+    run_crash_test "cols > MAX_COLS"       test_bad_manycols.csv    "$mode_workers"
+    run_test       "single char no newline" test_bad_single_char.csv "$mode_workers" expected_bad_single_char.txt
+    run_crash_test "binary garbage"       test_bad_binary.csv      "$mode_workers"
+    run_crash_test "500 columns"          test_bad_500cols.csv     "$mode_workers"
 done
 
 # --- Large file: validate row count across modes ---
 echo ""
 echo "--- Row count validation (bench_1k.csv, 1000 rows x 10 cols) ---"
-for mode_workers in 1 2 4; do
+for mode_workers in 1 2 4 6 8; do
     actual_rows=$(./test_parser bench_1k.csv "$mode_workers" 2>&1 | head -1 | grep -oP '\d+(?= rows)')
     TOTAL=$((TOTAL + 1))
     if [ "$actual_rows" = "1000" ]; then

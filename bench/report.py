@@ -10,7 +10,7 @@ Usage: python3 report.py [bench_results.txt]
 """
 import sys
 import os
-from collections import defaultdict
+from collections import defaultdict, OrderedDict
 
 def parse_results(path):
     """Parse the bench_results.txt file into structured records."""
@@ -26,16 +26,19 @@ def parse_results(path):
             parts = line.split(",")
             if len(parts) < 9:
                 continue
+            # Support old 9-column format (no avg) and new 10-column format
+            has_avg = len(parts) >= 10
             records.append({
                 "file": parts[0],
                 "workers": int(parts[1]),
                 "mode": parts[2],
                 "best_wall_s": float(parts[3]),
-                "mmap_s": float(parts[4]),
-                "scan_s": float(parts[5]),
-                "dispatch_s": float(parts[6]),
-                "parse_s": float(parts[7]),
-                "total_s": float(parts[8]),
+                "avg_wall_s": float(parts[4]) if has_avg else float(parts[3]),
+                "mmap_s": float(parts[5 if has_avg else 4]),
+                "scan_s": float(parts[6 if has_avg else 5]),
+                "dispatch_s": float(parts[7 if has_avg else 6]),
+                "parse_s": float(parts[8 if has_avg else 7]),
+                "total_s": float(parts[9 if has_avg else 8]),
             })
     return meta, records
 
@@ -43,12 +46,22 @@ def parse_results(path):
 def file_size_label(filename):
     """Map bench filename to a human label."""
     labels = {
-        "bench_100.csv": "100 rows (8K)",
-        "bench_1k.csv": "1K rows (84K)",
-        "bench_10k.csv": "10K rows (828K)",
-        "bench_100k.csv": "100K rows (8.1M)",
+        "bench_100.csv": "100 rows",
+        "bench_1k.csv": "1K rows",
+        "bench_10k.csv": "10K rows",
+        "bench_100k.csv": "100K rows",
     }
     return labels.get(filename, filename)
+
+
+WORKER_CONFIGS = [1, 2, 4, 6, 8]
+WORKER_LABELS = {
+    1: "Single",
+    2: "Dist+W(2)",
+    4: "Dist+S(4)",
+    6: "Dist+S(6)",
+    8: "Dist+S(8)",
+}
 
 
 def generate_text_report(meta, records, out_path):
@@ -65,28 +78,58 @@ def generate_text_report(meta, records, out_path):
         for r in records:
             by_file[r["file"]].append(r)
 
-        # Summary table
-        f.write("SUMMARY: Best wall-clock time (seconds)\n")
-        f.write("-" * 58 + "\n")
-        f.write(f"{'File':<22} {'Single':>10} {'Dist+Work':>10} {'Dist+Slv':>10}\n")
-        f.write("-" * 58 + "\n")
+        # Summary table — best
+        col_w = 12
+        hdr_labels = [WORKER_LABELS[w] for w in WORKER_CONFIGS]
+        hdr = f"{'File':<16}" + "".join(f"{l:>{col_w}}" for l in hdr_labels)
+        sep = "-" * len(hdr)
+        f.write("BEST wall-clock time (seconds)\n")
+        f.write(sep + "\n")
+        f.write(hdr + "\n")
+        f.write(sep + "\n")
         for fname in ["bench_100.csv", "bench_1k.csv", "bench_10k.csv", "bench_100k.csv"]:
             if fname not in by_file:
                 continue
             row = {}
             for r in by_file[fname]:
                 row[r["workers"]] = r["best_wall_s"]
-            f.write(f"{file_size_label(fname):<22} "
-                    f"{row.get(1, 0):>10.4f} "
-                    f"{row.get(2, 0):>10.4f} "
-                    f"{row.get(4, 0):>10.4f}\n")
-        f.write("-" * 58 + "\n\n")
+            f.write(f"{file_size_label(fname):<16}")
+            for w in WORKER_CONFIGS:
+                if w in row:
+                    f.write(f"{row[w]:>{col_w}.4f}")
+                else:
+                    f.write(f"{'n/a':>{col_w}}")
+            f.write("\n")
+        f.write(sep + "\n\n")
 
-        # Speedup table
-        f.write("SPEEDUP vs single-threaded\n")
-        f.write("-" * 48 + "\n")
-        f.write(f"{'File':<22} {'Dist+Work':>12} {'Dist+Slv':>12}\n")
-        f.write("-" * 48 + "\n")
+        # Summary table — average
+        f.write("AVERAGE wall-clock time (seconds)\n")
+        f.write(sep + "\n")
+        f.write(hdr + "\n")
+        f.write(sep + "\n")
+        for fname in ["bench_100.csv", "bench_1k.csv", "bench_10k.csv", "bench_100k.csv"]:
+            if fname not in by_file:
+                continue
+            row = {}
+            for r in by_file[fname]:
+                row[r["workers"]] = r["avg_wall_s"]
+            f.write(f"{file_size_label(fname):<16}")
+            for w in WORKER_CONFIGS:
+                if w in row:
+                    f.write(f"{row[w]:>{col_w}.4f}")
+                else:
+                    f.write(f"{'n/a':>{col_w}}")
+            f.write("\n")
+        f.write(sep + "\n\n")
+
+        # Speedup table — best
+        sp_labels = [WORKER_LABELS[w] for w in WORKER_CONFIGS[1:]]
+        sp_hdr = f"{'File':<16}" + "".join(f"{l:>{col_w}}" for l in sp_labels)
+        sp_sep = "-" * len(sp_hdr)
+        f.write("SPEEDUP vs single-threaded (best)\n")
+        f.write(sp_sep + "\n")
+        f.write(sp_hdr + "\n")
+        f.write(sp_sep + "\n")
         for fname in ["bench_100.csv", "bench_1k.csv", "bench_10k.csv", "bench_100k.csv"]:
             if fname not in by_file:
                 continue
@@ -95,12 +138,38 @@ def generate_text_report(meta, records, out_path):
                 row[r["workers"]] = r["best_wall_s"]
             base = row.get(1, 0)
             if base > 0:
-                sp2 = base / row.get(2, base) if row.get(2) else 0
-                sp4 = base / row.get(4, base) if row.get(4) else 0
-                f.write(f"{file_size_label(fname):<22} "
-                        f"{sp2:>11.2f}x "
-                        f"{sp4:>11.2f}x\n")
-        f.write("-" * 48 + "\n\n")
+                f.write(f"{file_size_label(fname):<16}")
+                for w in WORKER_CONFIGS[1:]:
+                    if w in row and row[w] > 0:
+                        sp = base / row[w]
+                        f.write(f"{sp:>{col_w - 1}.2f}x")
+                    else:
+                        f.write(f"{'n/a':>{col_w}}")
+                f.write("\n")
+        f.write(sp_sep + "\n\n")
+
+        # Speedup table — average
+        f.write("SPEEDUP vs single-threaded (average)\n")
+        f.write(sp_sep + "\n")
+        f.write(sp_hdr + "\n")
+        f.write(sp_sep + "\n")
+        for fname in ["bench_100.csv", "bench_1k.csv", "bench_10k.csv", "bench_100k.csv"]:
+            if fname not in by_file:
+                continue
+            row = {}
+            for r in by_file[fname]:
+                row[r["workers"]] = r["avg_wall_s"]
+            base = row.get(1, 0)
+            if base > 0:
+                f.write(f"{file_size_label(fname):<16}")
+                for w in WORKER_CONFIGS[1:]:
+                    if w in row and row[w] > 0:
+                        sp = base / row[w]
+                        f.write(f"{sp:>{col_w - 1}.2f}x")
+                    else:
+                        f.write(f"{'n/a':>{col_w}}")
+                f.write("\n")
+        f.write(sp_sep + "\n\n")
 
         # Per-phase breakdown
         f.write("PHASE BREAKDOWN (seconds) — from internal timing\n")
@@ -121,8 +190,7 @@ def generate_text_report(meta, records, out_path):
         big = [r for r in records if r["file"] == "bench_100k.csv"]
         if big:
             single = [r for r in big if r["workers"] == 1]
-            dw = [r for r in big if r["workers"] == 2]
-            ds = [r for r in big if r["workers"] == 4]
+            by_w = {r["workers"]: r for r in big}
 
             if single:
                 s = single[0]
@@ -130,18 +198,22 @@ def generate_text_report(meta, records, out_path):
                         f"{s['parse_s']:.4f}s parse\n")
                 size_mb = 8.1
                 f.write(f"  Throughput: {size_mb / s['best_wall_s']:.1f} MB/s\n")
-            if dw:
-                d = dw[0]
-                f.write(f"  Dist-as-worker (100K): {d['best_wall_s']:.4f}s wall, "
-                        f"scan={d['scan_s']:.4f}s parse={d['parse_s']:.4f}s\n")
-                f.write(f"  Scan overhead: {d['scan_s'] / d['total_s'] * 100:.1f}% of total\n")
-            if ds:
-                d = ds[0]
-                f.write(f"  Dist+slaves (100K): {d['best_wall_s']:.4f}s wall, "
-                        f"scan={d['scan_s']:.4f}s parse={d['parse_s']:.4f}s\n")
-            if single and dw:
-                f.write(f"\n  Recommendation for 2-core ESP: "
-                        f"{'dist-as-worker' if dw[0]['best_wall_s'] < single[0]['best_wall_s'] else 'single-threaded'}\n")
+
+            for w in WORKER_CONFIGS[1:]:
+                if w in by_w:
+                    d = by_w[w]
+                    f.write(f"  {WORKER_LABELS[w]} (100K): {d['best_wall_s']:.4f}s wall, "
+                            f"scan={d['scan_s']:.4f}s parse={d['parse_s']:.4f}s\n")
+                    if d['total_s'] > 0:
+                        f.write(f"    Scan overhead: {d['scan_s'] / d['total_s'] * 100:.1f}% of total\n")
+
+            # Best multi-threaded config
+            multi = [r for r in big if r["workers"] > 1]
+            if multi and single:
+                best = min(multi, key=lambda r: r["best_wall_s"])
+                speedup = single[0]["best_wall_s"] / best["best_wall_s"]
+                f.write(f"\n  Best config: {WORKER_LABELS[best['workers']]} "
+                        f"({speedup:.2f}x speedup)\n")
         f.write("-" * 70 + "\n")
 
     print(f"  Text report:  {out_path}")
@@ -150,9 +222,10 @@ def generate_text_report(meta, records, out_path):
 def generate_csv_report(records, out_path):
     """Generate a CSV with summary data."""
     with open(out_path, "w") as f:
-        f.write("file,workers,mode,best_wall_s\n")
+        f.write("file,workers,mode,best_wall_s,avg_wall_s\n")
         for r in records:
-            f.write(f"{r['file']},{r['workers']},{r['mode']},{r['best_wall_s']:.6f}\n")
+            f.write(f"{r['file']},{r['workers']},{r['mode']},"
+                    f"{r['best_wall_s']:.6f},{r['avg_wall_s']:.6f}\n")
     print(f"  CSV summary:  {out_path}")
 
 
@@ -168,8 +241,164 @@ def generate_phases_csv(records, out_path):
     print(f"  Phase detail: {out_path}")
 
 
+def generate_pdf_report(meta, records, out_path):
+    """Generate a PDF with speedup graphs for each phase and overall."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.backends.backend_pdf import PdfPages
+
+    FILES = ["bench_100.csv", "bench_1k.csv", "bench_10k.csv", "bench_100k.csv"]
+    PHASES = ["scan_s", "dispatch_s", "parse_s", "total_s"]
+    PHASE_LABELS = {"scan_s": "Scan", "dispatch_s": "Dispatch",
+                    "parse_s": "Parse", "total_s": "Total (internal)"}
+    COLORS = {"bench_100.csv": "#1f77b4", "bench_1k.csv": "#ff7f0e",
+              "bench_10k.csv": "#2ca02c", "bench_100k.csv": "#d62728"}
+    MARKERS = {"bench_100.csv": "o", "bench_1k.csv": "s",
+               "bench_10k.csv": "^", "bench_100k.csv": "D"}
+
+    # Index: file -> workers -> record
+    idx = defaultdict(dict)
+    for r in records:
+        idx[r["file"]][r["workers"]] = r
+
+    workers = sorted({r["workers"] for r in records})
+
+    with PdfPages(out_path) as pdf:
+        # --- Page 1: Overall wall-clock speedup (best + avg) ---
+        fig, (ax_best, ax_avg) = plt.subplots(1, 2, figsize=(14, 6))
+        fig.suptitle("csv-parser Benchmark Report", fontsize=16, fontweight="bold")
+
+        for ax, metric, title in [
+            (ax_best, "best_wall_s", "Overall Speedup (best)"),
+            (ax_avg, "avg_wall_s", "Overall Speedup (average)"),
+        ]:
+            subtitle = f"{title}  —  {meta['date']}" if "date" in meta else title
+            ax.set_title(subtitle, fontsize=11)
+            ax.set_xlabel("Workers")
+            ax.set_ylabel("Speedup vs single-threaded")
+            ax.set_yscale("log", base=2)
+            ax.axhline(y=1.0, color="gray", linestyle="--", linewidth=0.8, alpha=0.6)
+
+            for fname in FILES:
+                if fname not in idx:
+                    continue
+                base = idx[fname].get(1, {}).get(metric, 0)
+                if base <= 0:
+                    continue
+                xs = [w for w in workers if w in idx[fname]]
+                ys = [base / idx[fname][w][metric] for w in xs]
+                ax.plot(xs, ys, marker=MARKERS[fname], color=COLORS[fname],
+                        label=file_size_label(fname), linewidth=2, markersize=7)
+
+            ax.set_xticks(workers)
+            ax.legend(loc="upper left", fontsize=9)
+            ax.grid(True, alpha=0.3, which="both")
+            ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.2f}x"))
+
+        fig.tight_layout(rect=[0, 0, 1, 0.93])
+        pdf.savefig(fig)
+        plt.close(fig)
+
+        # --- Page 2: Per-phase speedup (2x2 grid) ---
+        fig, axes = plt.subplots(2, 2, figsize=(12, 9))
+        fig.suptitle("Per-Phase Speedup vs Single-Threaded", fontsize=14, fontweight="bold")
+
+        for ax, phase in zip(axes.flat, PHASES):
+            ax.set_title(PHASE_LABELS[phase], fontsize=11)
+            ax.set_xlabel("Workers")
+            ax.set_ylabel("Speedup")
+            ax.set_yscale("log", base=2)
+            ax.axhline(y=1.0, color="gray", linestyle="--", linewidth=0.8, alpha=0.6)
+
+            for fname in FILES:
+                if fname not in idx:
+                    continue
+                base_val = idx[fname].get(1, {}).get(phase, 0)
+                if base_val <= 0:
+                    continue
+                xs = [w for w in workers if w in idx[fname] and idx[fname][w].get(phase, 0) > 0]
+                ys = [base_val / idx[fname][w][phase] for w in xs]
+                ax.plot(xs, ys, marker=MARKERS[fname], color=COLORS[fname],
+                        label=file_size_label(fname), linewidth=1.5, markersize=5)
+
+            ax.set_xticks(workers)
+            ax.legend(fontsize=8, loc="upper left")
+            ax.grid(True, alpha=0.3, which="both")
+            ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.1f}x"))
+
+        fig.tight_layout(rect=[0, 0, 1, 0.95])
+        pdf.savefig(fig)
+        plt.close(fig)
+
+        # --- Page 3: Absolute time breakdown (stacked bars per file) ---
+        fig, axes = plt.subplots(2, 2, figsize=(12, 9))
+        fig.suptitle("Phase Time Breakdown (absolute seconds)", fontsize=14, fontweight="bold")
+
+        stack_phases = ["mmap_s", "scan_s", "dispatch_s", "parse_s"]
+        stack_colors = ["#aec7e8", "#ffbb78", "#98df8a", "#ff9896"]
+        stack_labels = ["mmap", "scan", "dispatch", "parse"]
+
+        for ax, fname in zip(axes.flat, FILES):
+            if fname not in idx:
+                continue
+            ax.set_title(file_size_label(fname), fontsize=11)
+            ax.set_xlabel("Workers")
+            ax.set_ylabel("Time (s)")
+
+            xs = [w for w in workers if w in idx[fname]]
+            bottoms = [0.0] * len(xs)
+            for sp, sc, sl in zip(stack_phases, stack_colors, stack_labels):
+                vals = [idx[fname][w].get(sp, 0) for w in xs]
+                ax.bar([str(w) for w in xs], vals, bottom=bottoms,
+                       color=sc, label=sl, edgecolor="white", linewidth=0.5)
+                bottoms = [b + v for b, v in zip(bottoms, vals)]
+
+            ax.legend(fontsize=8, loc="upper right")
+            ax.grid(True, alpha=0.3, axis="y")
+
+        fig.tight_layout(rect=[0, 0, 1, 0.95])
+        pdf.savefig(fig)
+        plt.close(fig)
+
+        # --- Page 4: Parse-only speedup (the real parallel work) ---
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.set_title("Parse Phase Speedup (parallel work only)", fontsize=13, fontweight="bold")
+        ax.set_xlabel("Workers")
+        ax.set_ylabel("Speedup vs single-threaded parse")
+        ax.set_yscale("log", base=2)
+        ax.axhline(y=1.0, color="gray", linestyle="--", linewidth=0.8, alpha=0.6)
+
+        # Ideal linear speedup reference
+        ax.plot(workers, workers, color="gray", linestyle=":", linewidth=1, alpha=0.5, label="Ideal linear")
+
+        for fname in FILES:
+            if fname not in idx:
+                continue
+            base = idx[fname].get(1, {}).get("parse_s", 0)
+            if base <= 0:
+                continue
+            xs = [w for w in workers if w in idx[fname] and idx[fname][w].get("parse_s", 0) > 0]
+            ys = [base / idx[fname][w]["parse_s"] for w in xs]
+            ax.plot(xs, ys, marker=MARKERS[fname], color=COLORS[fname],
+                    label=file_size_label(fname), linewidth=2, markersize=7)
+
+        ax.set_xticks(workers)
+        ax.legend(loc="upper left")
+        ax.grid(True, alpha=0.3, which="both")
+        ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.2f}x"))
+        fig.tight_layout()
+        pdf.savefig(fig)
+        plt.close(fig)
+
+    print(f"  PDF report:   {out_path}")
+
+
 def main():
-    results_path = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
+    no_pdf = "--no-pdf" in sys.argv
+    pdf_only = "--pdf-only" in sys.argv
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    results_path = args[0] if args else os.path.join(
         os.path.dirname(__file__), "bench_results.txt")
 
     if not os.path.exists(results_path):
@@ -183,9 +412,12 @@ def main():
 
     out_dir = os.path.dirname(results_path)
     print(f"Generating reports from {results_path}:")
-    generate_text_report(meta, records, os.path.join(out_dir, "bench_report.txt"))
-    generate_csv_report(records, os.path.join(out_dir, "bench_report.csv"))
-    generate_phases_csv(records, os.path.join(out_dir, "bench_phases.csv"))
+    if not pdf_only:
+        generate_text_report(meta, records, os.path.join(out_dir, "bench_report.txt"))
+        generate_csv_report(records, os.path.join(out_dir, "bench_report.csv"))
+        generate_phases_csv(records, os.path.join(out_dir, "bench_phases.csv"))
+    if not no_pdf:
+        generate_pdf_report(meta, records, os.path.join(out_dir, "bench_report.pdf"))
     print("Done.")
 
 

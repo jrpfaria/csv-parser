@@ -83,7 +83,8 @@ parse_token:
 
 parse_delimiter:
     word = word_flush(arena, &curr_word);
-    result->cells[cell_idx++] = word;
+    result->cells[cell_idx] = word;
+    cell_idx += (cell_idx < MAX_ROWS * MAX_COLS - 1);
     ++w_idx;
     goto worker_loop_start;
 
@@ -96,9 +97,10 @@ parse_update_status:
 
 parse_new_line:
     word = word_flush(arena, &curr_word);
-    result->cells[cell_idx++] = word;
+    result->cells[cell_idx] = word;
+    cell_idx += (cell_idx < MAX_ROWS * MAX_COLS - 1);
     result->cols[r_idx] = w_idx + 1;
-    ++r_idx;
+    r_idx += (r_idx < MAX_ROWS - 1);
     w_idx = 0;
     goto worker_loop_start;
 
@@ -109,9 +111,10 @@ worker_done:;
 
 worker_finalize:
     word = word_flush(arena, &curr_word);
-    result->cells[cell_idx++] = word;
+    result->cells[cell_idx] = word;
+    cell_idx += (cell_idx < MAX_ROWS * MAX_COLS - 1);
     result->cols[r_idx] = w_idx + 1;
-    ++r_idx;
+    r_idx += (r_idx < MAX_ROWS - 1);
 
 worker_exit:
     wu->n_rows = r_idx - wu->row_start;
@@ -188,8 +191,8 @@ mode_dist_slaves:;
 /* ===== Shared scan + dispatch for modes 1 and 2 ===== */
 mode_scan:;
 {
-    static int row_offsets[MAX_ROWS + 1];
-    static int cells_before_row[MAX_ROWS + 1];
+    static int row_offsets[MAX_ROWS + 2];
+    static int cells_before_row[MAX_ROWS + 2];
     int n_rows = 0;
     int in_q = 0;
     int col_count = 1;
@@ -200,20 +203,20 @@ mode_scan:;
     int remaining = file_len & 3;
     int aligned_len = file_len - remaining;
 
-#define SCAN_BYTE(IDX)                            \
-    do                                            \
-    {                                             \
-        char _c = data[(IDX)];                    \
-        int _is_q = !(_c ^ q);                    \
-        in_q ^= _is_q;                            \
-        col_count += (!(_c ^ d)) & !in_q;         \
-        int _is_nl = (!(_c ^ nl)) & !in_q;        \
-        row_offsets[n_rows + 1] = (IDX) + 1;      \
-        cells_before_row[n_rows + 1] =            \
-            cells_before_row[n_rows] + col_count; \
-        col_count = col_count * !_is_nl + _is_nl; \
-        n_rows += _is_nl;                         \
-    } while (0)
+#define SCAN_BYTE(IDX)                        \
+do                                            \
+{                                             \
+    char _c = data[(IDX)];                    \
+    int _is_q = !(_c ^ q);                    \
+    in_q ^= _is_q;                            \
+    col_count += (!(_c ^ d)) & !in_q;         \
+    int _is_nl = (!(_c ^ nl)) & !in_q;        \
+    row_offsets[n_rows + 1] = (IDX) + 1;      \
+    cells_before_row[n_rows + 1] =            \
+        cells_before_row[n_rows] + col_count; \
+    col_count = col_count * !_is_nl + _is_nl; \
+    n_rows += _is_nl & (n_rows < MAX_ROWS);   \
+} while (0)
 
 scan_loop:;
     const void *jt_scan[2] = {&&scan_body, &&scan_tail};
@@ -245,7 +248,7 @@ scan_trail_check:;
 dist_trail:
     row_offsets[n_rows + 1] = file_len;
     cells_before_row[n_rows + 1] = cells_before_row[n_rows] + col_count;
-    ++n_rows;
+    n_rows += (n_rows < MAX_ROWS);
 
 dist_no_trail:;
 
@@ -255,6 +258,16 @@ dist_no_trail:;
 dist_clamp:
     n_workers = n_rows;
 dist_no_clamp:;
+
+    /* empty file → nothing to parse */
+    const void *jt_empty[2] = {&&mode_done_zero, &&dist_proceed};
+    goto *jt_empty[!!n_workers];
+mode_done_zero:
+    result.n_rows = 0;
+    clock_gettime(CLOCK_MONOTONIC, &t2);
+    t3 = t2;
+    goto mode_done;
+dist_proceed:;
 
     clock_gettime(CLOCK_MONOTONIC, &t2);
 
