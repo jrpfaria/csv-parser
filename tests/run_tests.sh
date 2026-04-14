@@ -1,5 +1,5 @@
 #!/bin/bash
-# Test suite: validates parse accuracy across all 3 modes
+# Test suite: validates parse accuracy for both scalar and SIMD parsers
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -9,16 +9,21 @@ PASS=0
 FAIL=0
 TOTAL=0
 
-gcc -pthread -I"$ROOT_DIR/include" -o test_parser "$ROOT_DIR/src/parser.c" "$ROOT_DIR/src/list.c"
+echo "=== Compiling test binaries ==="
+gcc -pthread -I"$ROOT_DIR/include" -o test_parser \
+    "$ROOT_DIR/src/parser.c" "$ROOT_DIR/src/list.c"
+gcc -pthread -I"$ROOT_DIR/include" -o test_parser_simd \
+    "$ROOT_DIR/src/parser-simd.c" "$ROOT_DIR/src/list.c"
 
 run_test() {
     local name="$1"
     local csv_file="$2"
     local workers="$3"
     local expected_file="$4"
+    local binary="$5"
     TOTAL=$((TOTAL + 1))
 
-    actual=$(./test_parser "$csv_file" "$workers" 2>&1 | sed -n '/^  row /p')
+    actual=$("./$binary" "$csv_file" "$workers" 2>&1 | sed -n '/^  row /p')
     expected=$(cat "$expected_file")
 
     if [ "$actual" = "$expected" ]; then
@@ -37,9 +42,10 @@ run_crash_test() {
     local name="$1"
     local csv_file="$2"
     local workers="$3"
+    local binary="$4"
     TOTAL=$((TOTAL + 1))
 
-    ./test_parser "$csv_file" "$workers" >/dev/null 2>&1
+    "./$binary" "$csv_file" "$workers" >/dev/null 2>&1
     local rc=$?
     if [ "$rc" = "0" ]; then
         printf "  PASS: %s (no crash)\n" "$name"
@@ -72,9 +78,17 @@ Name,Value
 plain,99
 EOF
 
-cat > expected_qualifiers.txt << 'EOF'
+# Scalar parser doesn't capture quoted content (known limitation)
+cat > expected_qualifiers_scalar.txt << 'EOF'
   row 0 (2 cols): Name Value
   row 1 (2 cols):  42
+  row 2 (2 cols): plain 99
+EOF
+
+# SIMD parser correctly handles RFC 4180 quoting
+cat > expected_qualifiers_simd.txt << 'EOF'
+  row 0 (2 cols): Name Value
+  row 1 (2 cols): hello,world 42
   row 2 (2 cols): plain 99
 EOF
 
@@ -135,9 +149,12 @@ EOF
 cp "$ROOT_DIR/csv/test.csv" test_original.csv
 
 cat > expected_original.txt << 'EOF'
-  row 0 (3 cols): Age Height Name
-  row 1 (3 cols): 420 2470 Artur
-  row 2 (3 cols): 10 20 Sabio
+  row 0 (3 cols): City Country Population
+  row 1 (3 cols): Lisbon Portugal 548703
+  row 2 (3 cols): Tokyo Japan 13960000
+  row 3 (3 cols): Zurich Switzerland 421878
+  row 4 (3 cols): Nairobi Kenya 4397073
+  row 5 (3 cols): Reykjavik Iceland 138494
 EOF
 
 # --- Test 8: large generated file (validate row/col counts) ---
@@ -207,52 +224,62 @@ sys.stdout.buffer.write(b'a,b,c\n')
 python3 -c "print(','.join(str(i) for i in range(500)))" > test_bad_500cols.csv
 
 echo ""
-echo "=== Running tests (all modes) ==="
+echo "=== Running tests (both parsers, all modes) ==="
 
-for mode_workers in 1 2 4 6 8; do
-    mode_name="single"
-    [ "$mode_workers" = "2" ] && mode_name="dist-as-worker"
-    [ "$mode_workers" -ge "3" ] && mode_name="dist+slaves($mode_workers)"
-    printf "\n--- Mode: %s (workers=%d) ---\n" "$mode_name" "$mode_workers"
+for parser_bin in test_parser test_parser_simd; do
+    parser_label="scalar"
+    [ "$parser_bin" = "test_parser_simd" ] && parser_label="simd"
 
-    run_test "simple CSV"           test_simple.csv      "$mode_workers" expected_simple.txt
-    run_test "qualifiers"           test_qualifiers.csv  "$mode_workers" expected_qualifiers.txt
-    run_test "single column"        test_single_col.csv  "$mode_workers" expected_single_col.txt
-    run_test "no trailing newline"  test_no_trail.csv    "$mode_workers" expected_no_trail.txt
-    run_test "empty fields"         test_empty.csv       "$mode_workers" expected_empty.txt
-    run_test "ragged rows"          test_ragged.csv      "$mode_workers" expected_ragged.txt
-    run_test "original test.csv"    test_original.csv    "$mode_workers" expected_original.txt
+    for mode_workers in 1 2 4 6 8; do
+        mode_name="single"
+        [ "$mode_workers" = "2" ] && mode_name="dist-as-worker"
+        [ "$mode_workers" -ge "3" ] && mode_name="dist+slaves($mode_workers)"
+        printf "\n--- [%s] Mode: %s (workers=%d) ---\n" "$parser_label" "$mode_name" "$mode_workers"
 
-    # --- Bad CSV tests ---
-    run_crash_test "empty file"           test_bad_empty.csv       "$mode_workers"
-    run_crash_test "newline only"         test_bad_newline_only.csv "$mode_workers"
-    run_test       "only delimiters"      test_bad_delimiters.csv  "$mode_workers" expected_bad_delimiters.txt
-    run_test       "blank rows"           test_bad_blank_rows.csv  "$mode_workers" expected_bad_blank_rows.txt
-    run_crash_test "unclosed qualifier"   test_bad_unclosed_q.csv  "$mode_workers"
-    run_crash_test "word > MAX_WORD_LEN"  test_bad_longword.csv    "$mode_workers"
-    run_crash_test "cols > MAX_COLS"       test_bad_manycols.csv    "$mode_workers"
-    run_test       "single char no newline" test_bad_single_char.csv "$mode_workers" expected_bad_single_char.txt
-    run_crash_test "binary garbage"       test_bad_binary.csv      "$mode_workers"
-    run_crash_test "500 columns"          test_bad_500cols.csv     "$mode_workers"
+        run_test "simple CSV"           test_simple.csv      "$mode_workers" expected_simple.txt      "$parser_bin"
+        run_test "qualifiers"           test_qualifiers.csv  "$mode_workers" "expected_qualifiers_${parser_label}.txt" "$parser_bin"
+        run_test "single column"        test_single_col.csv  "$mode_workers" expected_single_col.txt  "$parser_bin"
+        run_test "no trailing newline"  test_no_trail.csv    "$mode_workers" expected_no_trail.txt    "$parser_bin"
+        run_test "empty fields"         test_empty.csv       "$mode_workers" expected_empty.txt       "$parser_bin"
+        run_test "ragged rows"          test_ragged.csv      "$mode_workers" expected_ragged.txt      "$parser_bin"
+        run_test "original test.csv"    test_original.csv    "$mode_workers" expected_original.txt    "$parser_bin"
+
+        # --- Bad CSV tests ---
+        run_crash_test "empty file"           test_bad_empty.csv       "$mode_workers" "$parser_bin"
+        run_crash_test "newline only"         test_bad_newline_only.csv "$mode_workers" "$parser_bin"
+        run_test       "only delimiters"      test_bad_delimiters.csv  "$mode_workers" expected_bad_delimiters.txt "$parser_bin"
+        run_test       "blank rows"           test_bad_blank_rows.csv  "$mode_workers" expected_bad_blank_rows.txt "$parser_bin"
+        run_crash_test "unclosed qualifier"   test_bad_unclosed_q.csv  "$mode_workers" "$parser_bin"
+        run_crash_test "word > MAX_WORD_LEN"  test_bad_longword.csv    "$mode_workers" "$parser_bin"
+        run_crash_test "cols > MAX_COLS"       test_bad_manycols.csv    "$mode_workers" "$parser_bin"
+        run_test       "single char no newline" test_bad_single_char.csv "$mode_workers" expected_bad_single_char.txt "$parser_bin"
+        run_crash_test "binary garbage"       test_bad_binary.csv      "$mode_workers" "$parser_bin"
+        run_crash_test "500 columns"          test_bad_500cols.csv     "$mode_workers" "$parser_bin"
+    done
 done
 
 # --- Large file: validate row count across modes ---
 echo ""
 echo "--- Row count validation (bench_1k.csv, 1000 rows x 10 cols) ---"
-for mode_workers in 1 2 4 6 8; do
-    actual_rows=$(./test_parser bench_1k.csv "$mode_workers" 2>&1 | head -1 | grep -oP '\d+(?= rows)')
-    TOTAL=$((TOTAL + 1))
-    if [ "$actual_rows" = "1000" ]; then
-        printf "  PASS: workers=%d → %s rows\n" "$mode_workers" "$actual_rows"
-        PASS=$((PASS + 1))
-    else
-        printf "  FAIL: workers=%d → expected 1000 rows, got %s\n" "$mode_workers" "$actual_rows"
-        FAIL=$((FAIL + 1))
-    fi
+for parser_bin in test_parser test_parser_simd; do
+    parser_label="scalar"
+    [ "$parser_bin" = "test_parser_simd" ] && parser_label="simd"
+
+    for mode_workers in 1 2 4 6 8; do
+        actual_rows=$("./$parser_bin" bench_1k.csv "$mode_workers" 2>&1 | head -1 | grep -oP '\d+(?= rows)')
+        TOTAL=$((TOTAL + 1))
+        if [ "$actual_rows" = "1000" ]; then
+            printf "  PASS: [%s] workers=%d → %s rows\n" "$parser_label" "$mode_workers" "$actual_rows"
+            PASS=$((PASS + 1))
+        else
+            printf "  FAIL: [%s] workers=%d → expected 1000 rows, got %s\n" "$parser_label" "$mode_workers" "$actual_rows"
+            FAIL=$((FAIL + 1))
+        fi
+    done
 done
 
 # Cleanup
-rm -f test_parser test_*.csv expected_*.txt bench_*.csv
+rm -f test_parser test_parser_simd test_*.csv expected_*.txt bench_*.csv
 
 echo ""
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="

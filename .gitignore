@@ -1,6 +1,32 @@
-*.txt
-*.csv
-*.out
-*.o
+# Binaries
 parser
+parser-simd
 parser_bench
+
+# Generated CSVs (regenerate with: make csv)
+csv/bench_*.csv
+bench/bench_*.csv
+
+# Benchmark outputs
+bench/parser_bench
+bench/parser_timing
+bench/parser_cmp
+bench/parser_simd_cmp
+bench/libcsv_bench
+bench/bench_results.txt
+bench/bench_report.txt
+bench/bench_report.csv
+bench/bench_phases.csv
+bench/bench_report.pdf
+bench/compare_results.txt
+bench/compare_report.txt
+
+# Test artifacts
+tests/test_parser
+tests/test_parser_simd
+tests/test_*.csv
+tests/expected_*.txt
+
+# Object files
+*.o
+*.out

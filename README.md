@@ -1,44 +1,112 @@
 # csv-parser
 
-A high-performance, branch-minimized CSV parser written in C. Every control flow
-decision uses computed `goto` jump tables instead of `if`/`switch` statements,
-and all hot-path memory operations use static flat buffers with zero heap
-allocation. Parsing is parallelized across worker threads with no mutual
-exclusion.
+A high-performance CSV parser written in C. Every control flow decision uses
+computed `goto` jump tables instead of `if`/`switch` statements, and all
+hot-path memory operations use static flat buffers with zero heap allocation.
+Parsing is parallelized across worker threads with no mutual exclusion.
+
+Two parser implementations are provided:
+
+- **`parser`** — Scalar goto-FSM. Classifies one byte per iteration using
+  bit-flag arithmetic and a 6-entry jump table.
+- **`parser-simd`** — SSE2-accelerated parser. Scans 16 bytes at a time to
+  find the next delimiter/quote/newline, then bulk-copies plain text via
+  `memcpy`. Uses byte-range partitioning for zero-scan multi-threading.
 
 ## Architecture
 
+### Scalar parser (`parser`)
+
 ```
 ┌──────────────────────────────────────────────────────┐
-│                    Distributor                        │
+│                    Distributor                       │
 │  1. mmap() the file                                  │
-│  2. Single-pass scan: find row offsets + cell counts  │
-│  3. Assign disjoint row ranges to N workers           │
+│  2. Single-pass scan: find row offsets + cell counts │
+│  3. Assign disjoint row ranges to N workers          │
 └────────┬──────────┬──────────┬──────────┬────────────┘
          │          │          │          │
     ┌────▼───┐ ┌────▼───┐ ┌────▼───┐ ┌────▼───┐
     │Worker 0│ │Worker 1│ │Worker 2│ │Worker 3│
     │arena[0]│ │arena[1]│ │arena[2]│ │arena[3]│
     └────┬───┘ └────┬───┘ └────┬───┘ └────┬───┘
-         │          │          │          │
          └──────────┴──────────┴──────────┘
                          │
-               ┌─────────▼─────────┐
-               │   csv_result_t    │
-               │  (shared, no locks│
-               │   — disjoint writes)
-               └───────────────────┘
+             ┌───────────▼───────────┐
+             │   csv_result_t        │
+             │  (shared, no locks    │
+             │   — disjoint writes)  |
+             └───────────────────────┘
 ```
 
-### Files
+The scalar parser uses a 4x-unrolled `SCAN_BYTE` macro to find row boundaries
+in the distributor, then dispatches pre-computed row ranges to workers. Each
+worker runs a byte-at-a-time goto FSM that classifies characters via XOR +
+bit-shift into a 6-entry jump table.
 
-| File | Purpose |
-|---|---|
-| `parser.c` | Distributor, worker FSM, and `main()` |
-| `list.h` | All type definitions and configurable limits |
-| `list.c` | `word_push`, `word_reset`, `word_flush` implementations |
-| `gen_csv.py` | Generates benchmark CSV files of various sizes |
-| `bench.sh` | Compiles with `-O2 -DBENCHMARK` and runs timed benchmarks |
+### SIMD parser (`parser-simd`)
+
+```
+┌────────────────────────────────────────────────────────────┐
+│                  Byte-Range Partitioner                    │
+│  1. mmap() the file                                        │
+│  2. Split file into N equal byte ranges                    │
+│  3. SSE2 find_next_newline() to align each boundary        │
+│     (16 bytes/cycle — NO full-file scan)                   │
+│  4. Each worker gets: {buf_ptr, byte_count, row_slot}      │
+└────┬──────────┬──────────┬──────────┬──────────────────────┘
+     │          │          │          │
+┌────▼───┐ ┌────▼───┐ ┌────▼───┐ ┌────▼───┐
+│Worker 0│ │Worker 1│ │Worker 2│ │Worker 3│
+│ SSE2   │ │ SSE2   │ │ SSE2   │ │ SSE2   │
+│ parse  │ │ parse  │ │ parse  │ │ parse  │
+│arena[0]│ │arena[1]│ │arena[2]│ │arena[3]│
+└────┬───┘ └────┬───┘ └────┬───┘ └────┬───┘
+     └──────────┴──────────┴──────────┘
+                      │
+            ┌─────────▼─────────┐
+            │   csv_result_t    │
+            │  compact after    │
+            │  join (memmove)   │
+            └───────────────────┘
+```
+
+The SIMD parser eliminates the distributor's full-file scan entirely. Instead
+of pre-scanning all row boundaries (which is a serial bottleneck), the file is
+split into N equal byte ranges. Each worker finds the nearest newline to align
+its start position using a fast SSE2 scan (16 bytes/cycle). Workers parse
+independently into private row/cell slots, then results are compacted into
+contiguous rows via `memmove` after all threads join.
+
+**Modes:**
+- **1 worker:** Direct SIMD parse, no scan, no threads.
+- **2+ workers:** Byte-range split → SSE2 boundary alignment → parallel
+  parse → compact.
+
+### Directory Structure
+
+```
+csv-parser/
+├── Makefile
+├── README.md
+├── requirements.txt          # matplotlib for PDF reports
+├── include/
+│   └── list.h                # type definitions + configurable limits
+├── src/
+│   ├── parser.c              # scalar goto-FSM parser
+│   ├── parser-simd.c         # SSE2-accelerated parser
+│   └── list.c                # word_push, word_flush, arena ops
+├── csv/
+│   └── test.csv              # small test file
+├── tests/
+│   └── run_tests.sh          # 90-test suite (17 cases × 5 worker configs)
+└── bench/
+    ├── bench.sh              # per-config benchmarks (best + avg)
+    ├── compare.sh            # comparative benchmark vs external parsers
+    ├── report.py             # text + PDF report generator
+    ├── gen_csv.py            # CSV file generator (4–32 char fields)
+    ├── libcsv_bench.c        # C wrapper for libcsv benchmarking
+    └── python_bench.py       # Python csv.reader benchmark wrapper
+```
 
 ---
 
@@ -46,12 +114,9 @@ exclusion.
 
 ### 1. Computed Goto FSM (no `if`/`switch`)
 
-All branching in both the worker and distributor uses GCC's computed `goto`
-extension (`&&label` + `goto *table[index]`). This eliminates branch prediction
-overhead — every transition is an indirect jump through a table looked up by
-an arithmetic index.
-
-The parser FSM encodes character classes as bit flags:
+All branching uses GCC's computed `goto` extension (`&&label` +
+`goto *table[index]`). The scalar parser FSM encodes character classes as
+bit flags:
 
 | Flag | Bit | Value |
 |---|---|---|
@@ -63,222 +128,224 @@ The parser FSM encodes character classes as bit flags:
 | (qualifier + newline) | 0+2 | `5` |
 
 The jump table at index `(is_delimiter | is_qualifier | is_endofline)` maps
-directly to one of 6 labels. Odd indices (where qualifier bit is set) all route
-to `parse_qualifier`, which handles both "entering/leaving quotes" and "inside
-quotes, ignore everything" — using a second jump table indexed by whether the
-current character is literally a `"`.
-
-**Why this matters:** The parser processes one character per iteration. A
-conventional `if`/`else if` chain would introduce 3–4 conditional branches per
-character. The computed goto replaces all of them with a single indexed indirect
-jump.
-
-### 2. Flat Buffers + Arena Allocator (zero malloc in hot path)
-
-The original implementation used a linked list of `list_node_t` (16 bytes per
-character due to pointer + padding). This was replaced with:
-
-- **`word_buf_t`**: A fixed `char[256]` buffer. Appending a character is
-  `buf[len++]` — a single indexed store. Resetting is `len = 0`.
-
-- **`arena_t`**: A 4 MB bump allocator per worker. `word_flush()` copies the
-  word buffer into the arena via `memcpy`, advances the position, and returns a
-  pointer. No `malloc`, no `free`, no fragmentation.
-
-- **`csv_result_t`**: A flat `char*[MAX_ROWS * MAX_COLS]` array with a
-  `cols[MAX_ROWS]` array. Workers write directly into pre-computed offsets.
-
-**Why this matters:** On embedded or memory-constrained targets, heap
-allocation is expensive and non-deterministic. The arena gives O(1) allocation
-with zero overhead. All sizes are compile-time constants tunable via `#define`.
-
-### 3. mmap Instead of fgetc
-
-The file is memory-mapped (`mmap`) and accessed as a `const char *` buffer.
-This replaces `fgetc()` (one function call per character with stdio buffering
-overhead) with direct indexed array access (`buf[pos++]`).
-
-**Why this matters:** `fgetc` involves a function call, a buffer check, and
-potential refill on every character. Direct buffer access compiles to a single
-load instruction.
-
-### 4. Threaded Distributor / Worker Model
-
-Parsing is split into two phases:
-
-1. **Distributor (single-threaded):** Scans the entire file in a single pass to
-   find row boundaries and count cells per row. This pass respects qualifiers
-   (a `\n` inside `"..."` doesn't start a new row). It then divides rows evenly
-   across N workers and computes each worker's `row_start`, `cell_start`, and
-   buffer slice.
-
-2. **Workers (N threads):** Each worker parses its assigned buffer slice using
-   the goto FSM. Each worker has its own `arena_t` and `word_buf_t`, and writes
-   into a disjoint slice of the shared `csv_result_t`.
-
-**No mutual exclusion is needed** because:
-- Workers read from non-overlapping regions of the mmap'd buffer
-- Workers write to non-overlapping regions of `result->cells[]` and
-  `result->cols[]`
-- Each worker has its own arena (no shared allocator)
-
-### 5. Unrolled Scan Loop
-
-The distributor's single-pass scan (row boundary detection + cell counting) is
-unrolled 4x using a `SCAN_BYTE` macro. The macro processes one byte with fully
-branchless arithmetic:
-
-```c
-col_count += (!(data[i] ^ d)) & !in_q;    // count delimiter if not in qualifier
-int _is_nl = (!(data[i] ^ nl)) & !in_q;   // detect newline if not in qualifier
-col_count = col_count * !_is_nl + _is_nl;  // reset to 1 on newline, else keep
-n_rows += _is_nl;                           // increment row count
-```
-
-The unrolled body calls `SCAN_BYTE` four times per iteration, with a goto-based
-tail loop handling the 0–3 remaining bytes. All loop control uses jump tables
-instead of `for` conditions.
-
-**Why this matters:** The scan loop runs over every byte of the file. Unrolling
-reduces the number of indirect jumps (loop back-edges) by 4x, and the
-branchless arithmetic avoids branch mispredictions on column/row boundaries.
-
-### 6. Branchless Character Classification
-
-Character classification uses XOR + NOT instead of comparison:
-
-```c
-!(token ^ q)   // equivalent to (token == q), but branchless
-```
-
-Bit-shifting encodes the result into the correct bit position for the jump table
-index:
+directly to one of 6 labels. Character classification uses XOR + NOT:
 
 ```c
 is_delimiter = (!(token ^ d)) << 1;   // bit 1
 is_endofline = (!(token ^ nl)) << 2;  // bit 2
 ```
 
-The OR of all flags gives the jump table index directly. No `if` chains, no
-short-circuit evaluation.
+### 2. SSE2 SIMD Acceleration (`parser-simd`)
 
-### 7. Static Storage for Large Structures
+The SIMD parser replaces the byte-at-a-time FSM with two SSE2-accelerated
+states:
 
-`arena_t` (4 MB), `csv_result_t` (~128 MB at max capacity), and scan arrays are
-declared `static` to place them in BSS rather than on the stack. The function
-returns a pointer to the static result instead of copying by value.
+- **`state_normal`**: `find_special()` loads 16 bytes via `_mm_loadu_si128`,
+  compares against delimiter, qualifier, and newline simultaneously using
+  `_mm_cmpeq_epi8`, ORs the three masks, then extracts a bitmask with
+  `_mm_movemask_epi8`. `__builtin_ctz()` gives the offset of the first
+  special character. All plain text before it is bulk-copied via
+  `word_push_bulk()` (a single `memcpy`).
+
+- **`state_in_qualifier`**: `find_qualifier()` scans 16 bytes at a time
+  for only the quote character. Quoted content is also bulk-copied.
+  RFC 4180 doubled-quote escaping (`""` → `"`) is handled at the transition.
+
+This converts ~10 goto jumps per field (one per character) into 1 SIMD scan +
+1 memcpy per field.
+
+### 3. Byte-Range Partitioning (zero-scan threading)
+
+The scalar parser requires a full-file scan phase to find row boundaries before
+dispatching work. On a 20 MB file, this scan takes ~30ms — nearly as long as
+the parse itself — creating a serial bottleneck that prevents scaling.
+
+The SIMD parser eliminates this entirely:
+
+1. Split the file into N equal byte ranges.
+2. For each boundary, call `find_next_newline()` — a pure SSE2 scan for `\n`
+   (processes 16 bytes per cycle). Cost: ~0.02ms total vs 30ms for the full
+   scan.
+3. Each worker gets a byte range and writes into a private region of
+   `csv_result_t` (row index = `worker_id × rows_per_slot`).
+4. After all workers join, a single-pass `memmove` compacts the results into
+   contiguous rows.
+
+### 4. Flat Buffers + Arena Allocator (zero malloc)
+
+- **`word_buf_t`**: Fixed `char[256]` buffer. `O(1)` append, `O(1)` reset.
+- **`arena_t`**: 32 MB bump allocator per worker. `word_flush()` = `memcpy` +
+  bump. No `malloc`, no `free`, no fragmentation.
+- **`csv_result_t`**: Flat `char*[MAX_ROWS × MAX_COLS]` with `cols[MAX_ROWS]`.
+
+All overflow points use branchless saturation guards:
+```c
+w->len += (w->len < MAX_WORD_LEN - 1);            // word_push
+cell_idx += (cell_idx < MAX_ROWS * MAX_COLS - 1); // cell overflow
+r_idx += (r_idx < MAX_ROWS - 1);                  // row overflow
+```
+
+### 5. mmap + No Locks
+
+The file is memory-mapped and accessed as `const char *`. Workers read from
+non-overlapping byte ranges and write to non-overlapping result regions.
+No mutex, no atomic, no lock — disjoint access by design.
 
 ---
 
 ## Configurable Limits
 
-All limits are `#define`s in `list.h`. Tune for your target:
+All limits are `#define`s in `include/list.h`:
 
 | Define | Default | Purpose |
 |---|---|---|
-| `MAX_WORD_LEN` | 256 | Maximum characters in a single cell |
-| `ARENA_SIZE` | 4 MB | Bump allocator size per worker |
+| `MAX_WORD_LEN` | 256 | Maximum characters per cell |
+| `ARENA_SIZE` | 32 MB | Bump allocator size per worker |
 | `MAX_COLS` | 64 | Maximum columns per row |
 | `MAX_ROWS` | 256K | Maximum total rows |
 | `MAX_WORKERS` | 8 | Maximum worker threads |
-| `NUM_WORKERS` | 4 | Actual worker count (in `parser.c`) |
+| `NUM_WORKERS` | 4 | Default worker count |
 
 ---
 
 ## Building
 
 ```bash
-# Normal build (with debug printf per character)
-gcc -pthread -o parser parser.c list.c
-
-# Optimized benchmark build (no printf)
-gcc -O2 -DBENCHMARK -pthread -o parser_bench parser.c list.c
+make              # builds both parser and parser-simd
+make parser       # scalar goto-FSM only
+make parser-simd  # SSE2-accelerated parser
 ```
+
+Requires GCC with computed goto support and SSE2 (baseline for all x86-64).
 
 ## Usage
 
 ```bash
-./parser test.csv
-# Also supports streaming via /dev/stdin:
-echo -e "a,b,c\n1,2,3" | ./parser /dev/stdin
+# Scalar parser (default 4 workers)
+./parser file.csv
+./parser file.csv 8          # specify worker count
+
+# SIMD parser (default 4 workers)
+./parser-simd file.csv
+./parser-simd file.csv 8     # specify worker count
 ```
+
+---
+
+## Testing
+
+```bash
+make test
+```
+
+Runs 90 tests: 17 test cases × 5 worker configurations (1, 2, 4, 6, 8).
+Includes correctness tests, edge cases, and bad CSV handling (empty files,
+binary garbage, unclosed qualifiers, column/row overflow, etc.).
 
 ---
 
 ## Benchmarks
 
-### Setup
+### Quick Benchmark
 
-`gen_csv.py` generates four test files with a fixed seed (`random.seed(42)`)
-for reproducibility:
+```bash
+make bench        # per-config benchmark (all worker counts, best + avg)
+make report       # text report
+make graph        # PDF with speedup charts (requires matplotlib)
+```
 
-| File | Rows | Columns | Size | Quoted fields |
-|---|---|---|---|---|
-| `bench_100.csv` | 100 | 5 | 8 KB | ~10% |
-| `bench_1k.csv` | 1,000 | 10 | 84 KB | ~10% |
-| `bench_10k.csv` | 10,000 | 10 | 828 KB | ~10% |
-| `bench_100k.csv` | 100,000 | 10 | 8.1 MB | ~10% |
+### Comparative Benchmark
 
-10% of fields contain a quoted value with an embedded comma (e.g.
-`"word1,word2"`), exercising the qualifier logic.
+```bash
+make compare      # vs libcsv, xsv, Miller, Python csv, cut
+```
 
-### Methodology
+Compares against:
+- **libcsv** — C library (libcsv3), fread-based, single-threaded
+- **xsv** — BurntSushi's Rust CSV toolkit (SIMD-optimized, single-threaded)
+- **Miller (mlr)** — Go-based CSV processor
+- **Python csv** — stdlib csv.reader
+- **cut** — Unix coreutils (no quote handling, raw I/O baseline)
 
-`bench.sh` runs each file 5 times and reports the best wall-clock time. The
-benchmark build (`-DBENCHMARK`) suppresses the per-character debug printf to
-measure pure parse performance. Compiled with `-O2` for realistic optimization.
+### Results (100K rows, 20 MB, Intel i7-1355U)
 
-### Results
+| Parser | Best | Throughput | Speedup |
+|---|---|---|---|
+| **csv-parser-simd (8w)** | 0.022s | 915 MB/s | 11.41x |
+| **csv-parser-simd (4w)** | 0.025s | 805 MB/s | 10.04x |
+| cut (Unix) | 0.031s | 649 MB/s | 8.10x |
+| xsv count (Rust) | 0.033s | 610 MB/s | 7.61x |
+| **csv-parser-simd (1w)** | 0.042s | 479 MB/s | 5.98x |
+| libcsv (C) | 0.062s | 325 MB/s | 4.05x |
+| csv-parser scalar (8w) | 0.072s | 280 MB/s | 3.49x |
+| csv-parser scalar (1w) | 0.092s | 219 MB/s | 2.73x |
+| xsv stats (Rust) | 0.136s | 148 MB/s | 1.85x |
+| Python csv | 0.153s | 132 MB/s | 1.64x |
+| Miller (Go) | 0.251s | 80 MB/s | 1.00x |
 
-**Single-threaded (flat buffers, mmap, no threads):**
+Speedup is relative to the slowest parser (1.00x = Miller).
 
-| File | Best |
-|---|---|
-| 100 rows (8K) | 0.001s |
-| 1K rows (84K) | 0.002s |
-| 10K rows (828K) | 0.017s |
-| 100K rows (8.1M) | 0.123s |
+### What Makes the SIMD Parser Fast
 
-**4-worker threaded (final version):**
+1. **16 bytes/cycle scanning** instead of 1 byte/cycle classification.
+2. **Bulk memcpy** of plain text instead of per-character `word_push`.
+3. **Zero-scan threading** — byte-range partitioning eliminates the 30ms
+   serial scan phase that bottlenecked the scalar parser's multi-worker modes.
+4. **Near memory-bandwidth ceiling** at 915 MB/s with 8 workers.
 
-| File | Best | vs Single |
-|---|---|---|
-| 100 rows (8K) | 0.002s | ~1x (thread overhead dominates) |
-| 1K rows (84K) | 0.002s | ~1x |
-| 10K rows (828K) | 0.006s | **2.8x** |
-| 100K rows (8.1M) | 0.049s | **2.5x** |
+### Scalar vs SIMD Comparison (100K rows)
 
-### Analysis
+| Config | Scalar | SIMD | SIMD speedup |
+|---|---|---|---|
+| 1 worker | 0.092s | 0.042s | 2.19x |
+| 4 workers | 0.086s | 0.025s | 3.44x |
+| 8 workers | 0.072s | 0.022s | 3.27x |
 
-- **Small files (< 100K):** Thread creation overhead (~100μs per thread)
-  dominates. Single-threaded is equivalent or faster.
-- **Large files (> 800K):** Near-linear scaling with worker count. The 2.5x
-  speedup with 4 workers (not 4x) is expected — the distributor's single-pass
-  scan is serial and accounts for ~30% of total time.
-- **Throughput:** ~165 MB/s on the 100K file (8.1 MB / 0.049s) with 4 workers.
-
-### Evolution of Performance (100K rows)
-
-| Version | Best | Key change |
-|---|---|---|
-| Original (linked list, `fgetc`) | 0.123s | — |
-| Flat buffers + arena + mmap | 0.123s | Zero malloc, but still `fgetc`→mmap only in threaded |
-| 4 workers, mmap | 0.049s | Parallel parsing |
-| Unrolled scan + merged passes | 0.052s | Single scan pass, 4x unroll on distributor |
-
-The main speedup comes from threading (2.5x). The unrolled scan provides
-marginal improvement on the distributor phase but keeps all control flow
-consistent with the project's branch-free philosophy.
+The scalar parser's 4-worker mode barely improves over 1-worker because the
+serial scan phase (~30ms) dominates. The SIMD parser's byte-range partitioning
+eliminates this bottleneck entirely, allowing near-linear scaling.
 
 ---
 
-## Running Benchmarks
+## Purpose
 
-```bash
-bash bench.sh
-```
+This project is a **case study in computed `goto` and performance-driven C
+development**. The goal was never to build a production CSV library — it was to
+take a single language feature (GCC's `&&label` computed goto) and explore how
+far it could be pushed as the sole control flow mechanism in a real parsing
+workload.
 
-This will:
-1. Generate all test CSVs via `gen_csv.py`
-2. Compile with `-O2 -DBENCHMARK -pthread`
-3. Run 5 iterations per file, report best-of-5
+The project was developed iteratively, with each phase designed to surface a
+specific performance bottleneck and force a concrete solution:
+
+1. **Linked lists + goto FSM** — Correct parsing, but per-character heap
+   allocation dominated runtime. Exposed the cost of `malloc` in a hot loop.
+2. **Flat buffers + arena allocator** — Eliminated heap allocation entirely.
+   Showed that memory layout matters more than algorithmic cleverness.
+3. **mmap + threaded workers** — Removed I/O overhead, parallelized parsing.
+   Revealed that the serial scan phase was the scaling bottleneck.
+4. **SIMD vectorization** — Replaced byte-at-a-time classification with
+   16-byte bulk scanning. Demonstrated the gap between "fast scalar" and
+   "hardware-accelerated."
+5. **Byte-range partitioning** — Eliminated the scan phase entirely. Showed
+   that architecture changes (how work is divided) can outweigh micro-
+   optimizations (how fast each byte is processed).
+
+Each step produced measurable before/after benchmarks, making the tradeoffs
+concrete rather than theoretical. The comparative benchmarks against
+established parsers (xsv, libcsv, Miller) provide external reference points
+for where this approach lands in practice.
+
+## Authorship
+
+The original work in this project is the **finite state machine design** for
+CSV parsing — encoding delimiter, qualifier, and newline as bit-flag character
+classes and using computed `goto` jump tables to eliminate all conditional
+branching from the parse loop. That core FSM concept and the initial
+linked-list-based parser were written by hand.
+
+All subsequent optimizations — flat buffers, arena allocators, mmap, threaded
+distribution, SIMD vectorization, byte-range partitioning, benchmarking
+infrastructure — were implemented with AI-assisted development (GitHub Copilot).
+Architecture and design decisions directed by the author; implementation
+assisted by LLM tooling.

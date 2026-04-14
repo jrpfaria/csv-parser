@@ -24,22 +24,52 @@ def parse_results(path):
             if not line or line.startswith("#"):
                 continue
             parts = line.split(",")
-            if len(parts) < 9:
-                continue
-            # Support old 9-column format (no avg) and new 10-column format
-            has_avg = len(parts) >= 10
-            records.append({
-                "file": parts[0],
-                "workers": int(parts[1]),
-                "mode": parts[2],
-                "best_wall_s": float(parts[3]),
-                "avg_wall_s": float(parts[4]) if has_avg else float(parts[3]),
-                "mmap_s": float(parts[5 if has_avg else 4]),
-                "scan_s": float(parts[6 if has_avg else 5]),
-                "dispatch_s": float(parts[7 if has_avg else 6]),
-                "parse_s": float(parts[8 if has_avg else 7]),
-                "total_s": float(parts[9 if has_avg else 8]),
-            })
+            # Support old format (file,workers,mode,...) and new (file,parser,workers,mode,...)
+            if len(parts) >= 11:
+                # New format: file,parser,workers,mode,best,avg,mmap,scan,dispatch,parse,total
+                records.append({
+                    "file": parts[0],
+                    "parser": parts[1],
+                    "workers": int(parts[2]),
+                    "mode": parts[3],
+                    "best_wall_s": float(parts[4]),
+                    "avg_wall_s": float(parts[5]),
+                    "mmap_s": float(parts[6]),
+                    "scan_s": float(parts[7]),
+                    "dispatch_s": float(parts[8]),
+                    "parse_s": float(parts[9]),
+                    "total_s": float(parts[10]),
+                })
+            elif len(parts) >= 10:
+                # Old 10-column format: file,workers,mode,best,avg,mmap,scan,dispatch,parse,total
+                records.append({
+                    "file": parts[0],
+                    "parser": "scalar",
+                    "workers": int(parts[1]),
+                    "mode": parts[2],
+                    "best_wall_s": float(parts[3]),
+                    "avg_wall_s": float(parts[4]),
+                    "mmap_s": float(parts[5]),
+                    "scan_s": float(parts[6]),
+                    "dispatch_s": float(parts[7]),
+                    "parse_s": float(parts[8]),
+                    "total_s": float(parts[9]),
+                })
+            elif len(parts) >= 9:
+                # Legacy 9-column format
+                records.append({
+                    "file": parts[0],
+                    "parser": "scalar",
+                    "workers": int(parts[1]),
+                    "mode": parts[2],
+                    "best_wall_s": float(parts[3]),
+                    "avg_wall_s": float(parts[3]),
+                    "mmap_s": float(parts[4]),
+                    "scan_s": float(parts[5]),
+                    "dispatch_s": float(parts[6]),
+                    "parse_s": float(parts[7]),
+                    "total_s": float(parts[8]),
+                })
     return meta, records
 
 
@@ -55,6 +85,7 @@ def file_size_label(filename):
 
 
 WORKER_CONFIGS = [1, 2, 4, 6, 8]
+PARSERS = ["scalar", "simd"]
 WORKER_LABELS = {
     1: "Single",
     2: "Dist+W(2)",
@@ -73,116 +104,70 @@ def generate_text_report(meta, records, out_path):
             f.write(f"  Generated: {meta['date']}\n")
         f.write("=" * 70 + "\n\n")
 
-        # Group by file
-        by_file = defaultdict(list)
+        # Group by file and parser
+        by_file_parser = defaultdict(lambda: defaultdict(list))
         for r in records:
-            by_file[r["file"]].append(r)
+            by_file_parser[r["file"]][r["parser"]].append(r)
 
-        # Summary table — best
+        # Summary table — best, for each parser
         col_w = 12
         hdr_labels = [WORKER_LABELS[w] for w in WORKER_CONFIGS]
         hdr = f"{'File':<16}" + "".join(f"{l:>{col_w}}" for l in hdr_labels)
         sep = "-" * len(hdr)
-        f.write("BEST wall-clock time (seconds)\n")
+
+        for plabel in PARSERS:
+            pname = plabel.upper()
+            f.write(f"BEST wall-clock time — {pname} parser (seconds)\n")
+            f.write(sep + "\n")
+            f.write(hdr + "\n")
+            f.write(sep + "\n")
+            for fname in ["bench_100.csv", "bench_1k.csv", "bench_10k.csv", "bench_100k.csv"]:
+                if fname not in by_file_parser or plabel not in by_file_parser[fname]:
+                    continue
+                row = {}
+                for r in by_file_parser[fname][plabel]:
+                    row[r["workers"]] = r["best_wall_s"]
+                f.write(f"{file_size_label(fname):<16}")
+                for w in WORKER_CONFIGS:
+                    if w in row:
+                        f.write(f"{row[w]:>{col_w}.4f}")
+                    else:
+                        f.write(f"{'n/a':>{col_w}}")
+                f.write("\n")
+            f.write(sep + "\n\n")
+
+        # Speedup table — scalar vs simd at each config
+        f.write("SIMD SPEEDUP vs SCALAR (best)\n")
         f.write(sep + "\n")
         f.write(hdr + "\n")
         f.write(sep + "\n")
         for fname in ["bench_100.csv", "bench_1k.csv", "bench_10k.csv", "bench_100k.csv"]:
-            if fname not in by_file:
+            scalar_data = {r["workers"]: r for r in by_file_parser.get(fname, {}).get("scalar", [])}
+            simd_data = {r["workers"]: r for r in by_file_parser.get(fname, {}).get("simd", [])}
+            if not scalar_data or not simd_data:
                 continue
-            row = {}
-            for r in by_file[fname]:
-                row[r["workers"]] = r["best_wall_s"]
             f.write(f"{file_size_label(fname):<16}")
             for w in WORKER_CONFIGS:
-                if w in row:
-                    f.write(f"{row[w]:>{col_w}.4f}")
+                if w in scalar_data and w in simd_data and simd_data[w]["best_wall_s"] > 0:
+                    sp = scalar_data[w]["best_wall_s"] / simd_data[w]["best_wall_s"]
+                    f.write(f"{sp:>{col_w - 1}.2f}x")
                 else:
                     f.write(f"{'n/a':>{col_w}}")
             f.write("\n")
         f.write(sep + "\n\n")
-
-        # Summary table — average
-        f.write("AVERAGE wall-clock time (seconds)\n")
-        f.write(sep + "\n")
-        f.write(hdr + "\n")
-        f.write(sep + "\n")
-        for fname in ["bench_100.csv", "bench_1k.csv", "bench_10k.csv", "bench_100k.csv"]:
-            if fname not in by_file:
-                continue
-            row = {}
-            for r in by_file[fname]:
-                row[r["workers"]] = r["avg_wall_s"]
-            f.write(f"{file_size_label(fname):<16}")
-            for w in WORKER_CONFIGS:
-                if w in row:
-                    f.write(f"{row[w]:>{col_w}.4f}")
-                else:
-                    f.write(f"{'n/a':>{col_w}}")
-            f.write("\n")
-        f.write(sep + "\n\n")
-
-        # Speedup table — best
-        sp_labels = [WORKER_LABELS[w] for w in WORKER_CONFIGS[1:]]
-        sp_hdr = f"{'File':<16}" + "".join(f"{l:>{col_w}}" for l in sp_labels)
-        sp_sep = "-" * len(sp_hdr)
-        f.write("SPEEDUP vs single-threaded (best)\n")
-        f.write(sp_sep + "\n")
-        f.write(sp_hdr + "\n")
-        f.write(sp_sep + "\n")
-        for fname in ["bench_100.csv", "bench_1k.csv", "bench_10k.csv", "bench_100k.csv"]:
-            if fname not in by_file:
-                continue
-            row = {}
-            for r in by_file[fname]:
-                row[r["workers"]] = r["best_wall_s"]
-            base = row.get(1, 0)
-            if base > 0:
-                f.write(f"{file_size_label(fname):<16}")
-                for w in WORKER_CONFIGS[1:]:
-                    if w in row and row[w] > 0:
-                        sp = base / row[w]
-                        f.write(f"{sp:>{col_w - 1}.2f}x")
-                    else:
-                        f.write(f"{'n/a':>{col_w}}")
-                f.write("\n")
-        f.write(sp_sep + "\n\n")
-
-        # Speedup table — average
-        f.write("SPEEDUP vs single-threaded (average)\n")
-        f.write(sp_sep + "\n")
-        f.write(sp_hdr + "\n")
-        f.write(sp_sep + "\n")
-        for fname in ["bench_100.csv", "bench_1k.csv", "bench_10k.csv", "bench_100k.csv"]:
-            if fname not in by_file:
-                continue
-            row = {}
-            for r in by_file[fname]:
-                row[r["workers"]] = r["avg_wall_s"]
-            base = row.get(1, 0)
-            if base > 0:
-                f.write(f"{file_size_label(fname):<16}")
-                for w in WORKER_CONFIGS[1:]:
-                    if w in row and row[w] > 0:
-                        sp = base / row[w]
-                        f.write(f"{sp:>{col_w - 1}.2f}x")
-                    else:
-                        f.write(f"{'n/a':>{col_w}}")
-                f.write("\n")
-        f.write(sp_sep + "\n\n")
 
         # Per-phase breakdown
         f.write("PHASE BREAKDOWN (seconds) — from internal timing\n")
-        f.write("-" * 78 + "\n")
-        f.write(f"{'File':<18} {'W':>2} {'Mode':<18} "
+        f.write("-" * 88 + "\n")
+        f.write(f"{'File':<18} {'P':>5} {'W':>2} {'Mode':<18} "
                 f"{'mmap':>8} {'scan':>8} {'disp':>8} {'parse':>8} {'total':>8}\n")
-        f.write("-" * 78 + "\n")
+        f.write("-" * 88 + "\n")
         for r in records:
-            f.write(f"{r['file']:<18} {r['workers']:>2} {r['mode']:<18} "
+            f.write(f"{r['file']:<18} {r['parser']:>5} {r['workers']:>2} {r['mode']:<18} "
                     f"{r['mmap_s']:>8.5f} {r['scan_s']:>8.5f} "
                     f"{r['dispatch_s']:>8.5f} {r['parse_s']:>8.5f} "
                     f"{r['total_s']:>8.5f}\n")
-        f.write("-" * 78 + "\n\n")
+        f.write("-" * 88 + "\n\n")
 
         # Analysis
         f.write("ANALYSIS\n")
@@ -222,9 +207,9 @@ def generate_text_report(meta, records, out_path):
 def generate_csv_report(records, out_path):
     """Generate a CSV with summary data."""
     with open(out_path, "w") as f:
-        f.write("file,workers,mode,best_wall_s,avg_wall_s\n")
+        f.write("file,parser,workers,mode,best_wall_s,avg_wall_s\n")
         for r in records:
-            f.write(f"{r['file']},{r['workers']},{r['mode']},"
+            f.write(f"{r['file']},{r['parser']},{r['workers']},{r['mode']},"
                     f"{r['best_wall_s']:.6f},{r['avg_wall_s']:.6f}\n")
     print(f"  CSV summary:  {out_path}")
 
@@ -232,9 +217,9 @@ def generate_csv_report(records, out_path):
 def generate_phases_csv(records, out_path):
     """Generate a CSV with per-phase breakdown."""
     with open(out_path, "w") as f:
-        f.write("file,workers,mode,mmap_s,scan_s,dispatch_s,parse_s,total_s\n")
+        f.write("file,parser,workers,mode,mmap_s,scan_s,dispatch_s,parse_s,total_s\n")
         for r in records:
-            f.write(f"{r['file']},{r['workers']},{r['mode']},"
+            f.write(f"{r['file']},{r['parser']},{r['workers']},{r['mode']},"
                     f"{r['mmap_s']:.6f},{r['scan_s']:.6f},"
                     f"{r['dispatch_s']:.6f},{r['parse_s']:.6f},"
                     f"{r['total_s']:.6f}\n")
@@ -252,20 +237,30 @@ def generate_pdf_report(meta, records, out_path):
     PHASES = ["scan_s", "dispatch_s", "parse_s", "total_s"]
     PHASE_LABELS = {"scan_s": "Scan", "dispatch_s": "Dispatch",
                     "parse_s": "Parse", "total_s": "Total (internal)"}
-    COLORS = {"bench_100.csv": "#1f77b4", "bench_1k.csv": "#ff7f0e",
-              "bench_10k.csv": "#2ca02c", "bench_100k.csv": "#d62728"}
-    MARKERS = {"bench_100.csv": "o", "bench_1k.csv": "s",
-               "bench_10k.csv": "^", "bench_100k.csv": "D"}
+    COLORS = {
+        ("bench_100.csv", "scalar"): "#aec7e8", ("bench_100.csv", "simd"): "#1f77b4",
+        ("bench_1k.csv", "scalar"): "#ffbb78", ("bench_1k.csv", "simd"): "#ff7f0e",
+        ("bench_10k.csv", "scalar"): "#98df8a", ("bench_10k.csv", "simd"): "#2ca02c",
+        ("bench_100k.csv", "scalar"): "#ff9896", ("bench_100k.csv", "simd"): "#d62728",
+    }
+    MARKERS = {
+        ("bench_100.csv", "scalar"): "o", ("bench_100.csv", "simd"): "o",
+        ("bench_1k.csv", "scalar"): "s", ("bench_1k.csv", "simd"): "s",
+        ("bench_10k.csv", "scalar"): "^", ("bench_10k.csv", "simd"): "^",
+        ("bench_100k.csv", "scalar"): "D", ("bench_100k.csv", "simd"): "D",
+    }
+    LSTYLES = {"scalar": "--", "simd": "-"}
 
-    # Index: file -> workers -> record
+    # Index: (file, parser) -> workers -> record
     idx = defaultdict(dict)
     for r in records:
-        idx[r["file"]][r["workers"]] = r
+        idx[(r["file"], r["parser"])][r["workers"]] = r
 
     workers = sorted({r["workers"] for r in records})
+    parsers_found = sorted({r["parser"] for r in records})
 
     with PdfPages(out_path) as pdf:
-        # --- Page 1: Overall wall-clock speedup (best + avg) ---
+        # --- Page 1: Overall wall-clock speedup (both parsers) ---
         fig, (ax_best, ax_avg) = plt.subplots(1, 2, figsize=(14, 6))
         fig.suptitle("csv-parser Benchmark Report", fontsize=16, fontweight="bold")
 
@@ -276,23 +271,31 @@ def generate_pdf_report(meta, records, out_path):
             subtitle = f"{title}  —  {meta['date']}" if "date" in meta else title
             ax.set_title(subtitle, fontsize=11)
             ax.set_xlabel("Workers")
-            ax.set_ylabel("Speedup vs single-threaded")
+            ax.set_ylabel("Speedup vs scalar single-threaded")
             ax.set_yscale("log", base=2)
             ax.axhline(y=1.0, color="gray", linestyle="--", linewidth=0.8, alpha=0.6)
 
             for fname in FILES:
-                if fname not in idx:
+                # Use scalar single-threaded as the baseline for both
+                base = idx.get((fname, "scalar"), {}).get(1, {})
+                base_val = base.get(metric, 0) if isinstance(base, dict) else 0
+                if base_val <= 0:
                     continue
-                base = idx[fname].get(1, {}).get(metric, 0)
-                if base <= 0:
-                    continue
-                xs = [w for w in workers if w in idx[fname]]
-                ys = [base / idx[fname][w][metric] for w in xs]
-                ax.plot(xs, ys, marker=MARKERS[fname], color=COLORS[fname],
-                        label=file_size_label(fname), linewidth=2, markersize=7)
+                for plabel in parsers_found:
+                    key = (fname, plabel)
+                    if key not in idx:
+                        continue
+                    xs = [w for w in workers if w in idx[key]]
+                    ys = [base_val / idx[key][w][metric] for w in xs]
+                    color = COLORS.get(key, "#333")
+                    marker = MARKERS.get(key, "o")
+                    ls = LSTYLES.get(plabel, "-")
+                    ax.plot(xs, ys, marker=marker, color=color, linestyle=ls,
+                            label=f"{file_size_label(fname)} ({plabel})",
+                            linewidth=2, markersize=6)
 
             ax.set_xticks(workers)
-            ax.legend(loc="upper left", fontsize=9)
+            ax.legend(loc="upper left", fontsize=7, ncol=2)
             ax.grid(True, alpha=0.3, which="both")
             ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.2f}x"))
 
@@ -302,7 +305,7 @@ def generate_pdf_report(meta, records, out_path):
 
         # --- Page 2: Per-phase speedup (2x2 grid) ---
         fig, axes = plt.subplots(2, 2, figsize=(12, 9))
-        fig.suptitle("Per-Phase Speedup vs Single-Threaded", fontsize=14, fontweight="bold")
+        fig.suptitle("Per-Phase Speedup vs Scalar Single-Threaded", fontsize=14, fontweight="bold")
 
         for ax, phase in zip(axes.flat, PHASES):
             ax.set_title(PHASE_LABELS[phase], fontsize=11)
@@ -312,18 +315,24 @@ def generate_pdf_report(meta, records, out_path):
             ax.axhline(y=1.0, color="gray", linestyle="--", linewidth=0.8, alpha=0.6)
 
             for fname in FILES:
-                if fname not in idx:
-                    continue
-                base_val = idx[fname].get(1, {}).get(phase, 0)
+                base_val = idx.get((fname, "scalar"), {}).get(1, {}).get(phase, 0)
                 if base_val <= 0:
                     continue
-                xs = [w for w in workers if w in idx[fname] and idx[fname][w].get(phase, 0) > 0]
-                ys = [base_val / idx[fname][w][phase] for w in xs]
-                ax.plot(xs, ys, marker=MARKERS[fname], color=COLORS[fname],
-                        label=file_size_label(fname), linewidth=1.5, markersize=5)
+                for plabel in parsers_found:
+                    key = (fname, plabel)
+                    if key not in idx:
+                        continue
+                    xs = [w for w in workers if w in idx[key] and idx[key][w].get(phase, 0) > 0]
+                    ys = [base_val / idx[key][w][phase] for w in xs]
+                    color = COLORS.get(key, "#333")
+                    marker = MARKERS.get(key, "o")
+                    ls = LSTYLES.get(plabel, "-")
+                    ax.plot(xs, ys, marker=marker, color=color, linestyle=ls,
+                            label=f"{file_size_label(fname)} ({plabel})",
+                            linewidth=1.5, markersize=5)
 
             ax.set_xticks(workers)
-            ax.legend(fontsize=8, loc="upper left")
+            ax.legend(fontsize=6, loc="upper left", ncol=2)
             ax.grid(True, alpha=0.3, which="both")
             ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.1f}x"))
 
@@ -331,7 +340,7 @@ def generate_pdf_report(meta, records, out_path):
         pdf.savefig(fig)
         plt.close(fig)
 
-        # --- Page 3: Absolute time breakdown (stacked bars per file) ---
+        # --- Page 3: Absolute time breakdown (stacked bars, scalar vs simd side by side) ---
         fig, axes = plt.subplots(2, 2, figsize=(12, 9))
         fig.suptitle("Phase Time Breakdown (absolute seconds)", fontsize=14, fontweight="bold")
 
@@ -340,21 +349,37 @@ def generate_pdf_report(meta, records, out_path):
         stack_labels = ["mmap", "scan", "dispatch", "parse"]
 
         for ax, fname in zip(axes.flat, FILES):
-            if fname not in idx:
-                continue
             ax.set_title(file_size_label(fname), fontsize=11)
-            ax.set_xlabel("Workers")
+            ax.set_xlabel("Config")
             ax.set_ylabel("Time (s)")
 
-            xs = [w for w in workers if w in idx[fname]]
-            bottoms = [0.0] * len(xs)
+            bar_labels = []
+            for plabel in parsers_found:
+                key = (fname, plabel)
+                if key not in idx:
+                    continue
+                for w in workers:
+                    if w in idx[key]:
+                        bar_labels.append(f"{plabel[0]}{w}")
+
+            x_pos = list(range(len(bar_labels)))
+            bottoms = [0.0] * len(bar_labels)
             for sp, sc, sl in zip(stack_phases, stack_colors, stack_labels):
-                vals = [idx[fname][w].get(sp, 0) for w in xs]
-                ax.bar([str(w) for w in xs], vals, bottom=bottoms,
+                vals = []
+                for plabel in parsers_found:
+                    key = (fname, plabel)
+                    if key not in idx:
+                        continue
+                    for w in workers:
+                        if w in idx[key]:
+                            vals.append(idx[key][w].get(sp, 0))
+                ax.bar(x_pos, vals, bottom=bottoms,
                        color=sc, label=sl, edgecolor="white", linewidth=0.5)
                 bottoms = [b + v for b, v in zip(bottoms, vals)]
 
-            ax.legend(fontsize=8, loc="upper right")
+            ax.set_xticks(x_pos)
+            ax.set_xticklabels(bar_labels, fontsize=7, rotation=45)
+            ax.legend(fontsize=7, loc="upper right")
             ax.grid(True, alpha=0.3, axis="y")
 
         fig.tight_layout(rect=[0, 0, 1, 0.95])
@@ -365,26 +390,30 @@ def generate_pdf_report(meta, records, out_path):
         fig, ax = plt.subplots(figsize=(10, 6))
         ax.set_title("Parse Phase Speedup (parallel work only)", fontsize=13, fontweight="bold")
         ax.set_xlabel("Workers")
-        ax.set_ylabel("Speedup vs single-threaded parse")
+        ax.set_ylabel("Speedup vs scalar single-threaded parse")
         ax.set_yscale("log", base=2)
         ax.axhline(y=1.0, color="gray", linestyle="--", linewidth=0.8, alpha=0.6)
-
-        # Ideal linear speedup reference
         ax.plot(workers, workers, color="gray", linestyle=":", linewidth=1, alpha=0.5, label="Ideal linear")
 
         for fname in FILES:
-            if fname not in idx:
-                continue
-            base = idx[fname].get(1, {}).get("parse_s", 0)
+            base = idx.get((fname, "scalar"), {}).get(1, {}).get("parse_s", 0)
             if base <= 0:
                 continue
-            xs = [w for w in workers if w in idx[fname] and idx[fname][w].get("parse_s", 0) > 0]
-            ys = [base / idx[fname][w]["parse_s"] for w in xs]
-            ax.plot(xs, ys, marker=MARKERS[fname], color=COLORS[fname],
-                    label=file_size_label(fname), linewidth=2, markersize=7)
+            for plabel in parsers_found:
+                key = (fname, plabel)
+                if key not in idx:
+                    continue
+                xs = [w for w in workers if w in idx[key] and idx[key][w].get("parse_s", 0) > 0]
+                ys = [base / idx[key][w]["parse_s"] for w in xs]
+                color = COLORS.get(key, "#333")
+                marker = MARKERS.get(key, "o")
+                ls = LSTYLES.get(plabel, "-")
+                ax.plot(xs, ys, marker=marker, color=color, linestyle=ls,
+                        label=f"{file_size_label(fname)} ({plabel})",
+                        linewidth=2, markersize=6)
 
         ax.set_xticks(workers)
-        ax.legend(loc="upper left")
+        ax.legend(loc="upper left", fontsize=7, ncol=2)
         ax.grid(True, alpha=0.3, which="both")
         ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.2f}x"))
         fig.tight_layout()
