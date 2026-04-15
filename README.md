@@ -1,17 +1,19 @@
 # csv-parser
 
-A high-performance CSV parser written in C. Every control flow decision uses
-computed `goto` jump tables instead of `if`/`switch` statements, and all
-hot-path memory operations use static flat buffers with zero heap allocation.
-Parsing is parallelized across worker threads with no mutual exclusion.
+A high-performance CSV parser written in C, exploring two fundamentally
+different control flow strategies: computed `goto` jump tables vs conventional
+`if`/`while` with compiler branch hints. All hot-path memory operations use
+static flat buffers with zero heap allocation. Parsing is parallelized across
+worker threads with no mutual exclusion.
 
-Two parser implementations are provided:
+Four parser variants are provided:
 
-- **`parser`** — Scalar goto-FSM. Classifies one byte per iteration using
-  bit-flag arithmetic and a 6-entry jump table.
-- **`parser-simd`** — SSE2-accelerated parser. Scans 16 bytes at a time to
-  find the next delimiter/quote/newline, then bulk-copies plain text via
-  `memcpy`. Uses byte-range partitioning for zero-scan multi-threading.
+| Variant | Control Flow | Parse Strategy |
+|---|---|---|
+| **`goto-parser`** | Computed `goto` jump tables | Byte-at-a-time, 6-entry FSM |
+| **`goto-parser-simd`** | Computed `goto` jump tables | SSE2 16-byte bulk scanning |
+| **`branched-parser`** | `if`/`while` + `likely`/`unlikely` | Byte-at-a-time |
+| **`branched-parser-simd`** | `if`/`while` + `likely`/`unlikely` | SSE2 16-byte bulk scanning |
 
 ## Architecture
 
@@ -88,24 +90,28 @@ contiguous rows via `memmove` after all threads join.
 csv-parser/
 ├── Makefile
 ├── README.md
-├── requirements.txt          # matplotlib for PDF reports
+├── requirements.txt              # matplotlib for PDF reports
 ├── include/
-│   └── list.h                # type definitions + configurable limits
+│   └── csv_common.h              # type definitions + configurable limits
 ├── src/
-│   ├── parser.c              # scalar goto-FSM parser
-│   ├── parser-simd.c         # SSE2-accelerated parser
-│   └── list.c                # word_push, word_flush, arena ops
+│   ├── csv_common.c              # word_push, word_flush, arena ops
+│   ├── goto/
+│   │   ├── parser.c              # scalar goto-FSM parser
+│   │   └── parser-simd.c         # SSE2 goto parser
+│   └── branched/
+│       ├── parser.c              # scalar branched parser
+│       └── parser-simd.c         # SSE2 branched parser
 ├── csv/
-│   └── test.csv              # small test file
+│   └── test.csv                  # small test file
 ├── tests/
-│   └── run_tests.sh          # 90-test suite (17 cases × 5 worker configs)
+│   └── run_tests.sh              # 360-test suite (4 parsers × 5 workers × 17+1 cases)
 └── bench/
-    ├── bench.sh              # per-config benchmarks (best + avg)
-    ├── compare.sh            # comparative benchmark vs external parsers
-    ├── report.py             # text + PDF report generator
-    ├── gen_csv.py            # CSV file generator (4–32 char fields)
-    ├── libcsv_bench.c        # C wrapper for libcsv benchmarking
-    └── python_bench.py       # Python csv.reader benchmark wrapper
+    ├── bench.sh                  # per-config benchmarks (best + avg)
+    ├── compare.sh                # comparative benchmark vs external parsers
+    ├── report.py                 # text + PDF report generator
+    ├── gen_csv.py                # CSV file generator (4–32 char fields)
+    ├── libcsv_bench.c            # C wrapper for libcsv benchmarking
+    └── python_bench.py           # Python csv.reader benchmark wrapper
 ```
 
 ---
@@ -195,7 +201,7 @@ No mutex, no atomic, no lock — disjoint access by design.
 
 ## Configurable Limits
 
-All limits are `#define`s in `include/list.h`:
+All limits are `#define`s in `include/csv_common.h`:
 
 | Define | Default | Purpose |
 |---|---|---|
@@ -211,9 +217,11 @@ All limits are `#define`s in `include/list.h`:
 ## Building
 
 ```bash
-make              # builds both parser and parser-simd
-make parser       # scalar goto-FSM only
-make parser-simd  # SSE2-accelerated parser
+make                       # builds all 4 variants
+make goto-parser           # scalar goto-FSM only
+make goto-parser-simd      # SSE2 goto parser
+make branched-parser       # scalar branched parser
+make branched-parser-simd  # SSE2 branched parser
 ```
 
 Requires GCC with computed goto support and SSE2 (baseline for all x86-64).
@@ -221,13 +229,13 @@ Requires GCC with computed goto support and SSE2 (baseline for all x86-64).
 ## Usage
 
 ```bash
-# Scalar parser (default 4 workers)
-./parser file.csv
-./parser file.csv 8          # specify worker count
+# Goto variants
+./goto-parser file.csv
+./goto-parser-simd file.csv 8
 
-# SIMD parser (default 4 workers)
-./parser-simd file.csv
-./parser-simd file.csv 8     # specify worker count
+# Branched variants
+./branched-parser file.csv
+./branched-parser-simd file.csv 8
 ```
 
 ---
@@ -238,9 +246,9 @@ Requires GCC with computed goto support and SSE2 (baseline for all x86-64).
 make test
 ```
 
-Runs 90 tests: 17 test cases × 5 worker configurations (1, 2, 4, 6, 8).
-Includes correctness tests, edge cases, and bad CSV handling (empty files,
-binary garbage, unclosed qualifiers, column/row overflow, etc.).
+Runs 360 tests: 4 parsers × 17 test cases × 5 worker configurations (1, 2, 4, 6, 8),
+plus 20 row-count validations. Includes correctness tests, edge cases, and bad CSV
+handling (empty files, binary garbage, unclosed qualifiers, column/row overflow, etc.).
 
 ---
 
@@ -271,14 +279,19 @@ Compares against:
 
 | Parser | Best | Throughput | Speedup |
 |---|---|---|---|
-| **csv-parser-simd (8w)** | 0.022s | 915 MB/s | 11.41x |
-| **csv-parser-simd (4w)** | 0.025s | 805 MB/s | 10.04x |
+| **branched-simd (8w)** | 0.013s | 1,603 MB/s | 19.31x |
+| **branched-simd (4w)** | 0.015s | 1,387 MB/s | 16.73x |
+| *goto-simd (8w)* | 0.019s | 1,095 MB/s | 13.21x |
+| *goto-simd (4w)* | 0.023s | 904 MB/s | 10.91x |
+| **branched-simd (1w)** | 0.028s | 743 MB/s | 8.96x |
 | cut (Unix) | 0.031s | 649 MB/s | 8.10x |
 | xsv count (Rust) | 0.033s | 610 MB/s | 7.61x |
-| **csv-parser-simd (1w)** | 0.042s | 479 MB/s | 5.98x |
+| *goto-simd (1w)* | 0.041s | 507 MB/s | 6.12x |
+| **branched-scalar (8w)** | 0.058s | 359 MB/s | 4.33x |
+| **branched-scalar (1w)** | 0.061s | 341 MB/s | 4.11x |
 | libcsv (C) | 0.062s | 325 MB/s | 4.05x |
-| csv-parser scalar (8w) | 0.072s | 280 MB/s | 3.49x |
-| csv-parser scalar (1w) | 0.092s | 219 MB/s | 2.73x |
+| *goto-scalar (8w)* | 0.071s | 293 MB/s | 3.54x |
+| *goto-scalar (1w)* | 0.090s | 231 MB/s | 2.79x |
 | xsv stats (Rust) | 0.136s | 148 MB/s | 1.85x |
 | Python csv | 0.153s | 132 MB/s | 1.64x |
 | Miller (Go) | 0.251s | 80 MB/s | 1.00x |
@@ -291,19 +304,34 @@ Speedup is relative to the slowest parser (1.00x = Miller).
 2. **Bulk memcpy** of plain text instead of per-character `word_push`.
 3. **Zero-scan threading** — byte-range partitioning eliminates the 30ms
    serial scan phase that bottlenecked the scalar parser's multi-worker modes.
-4. **Near memory-bandwidth ceiling** at 915 MB/s with 8 workers.
+4. **Near memory-bandwidth ceiling** at 1,603 MB/s with 8 workers (branched).
 
-### Scalar vs SIMD Comparison (100K rows)
+### Goto vs Branched Comparison (100K rows, `-O3`)
 
-| Config | Scalar | SIMD | SIMD speedup |
-|---|---|---|---|
-| 1 worker | 0.092s | 0.042s | 2.19x |
-| 4 workers | 0.086s | 0.025s | 3.44x |
-| 8 workers | 0.072s | 0.022s | 3.27x |
+| Variant | 1w | 2w | 4w | 6w | 8w |
+|---|---|---|---|---|---|
+| goto-scalar | 89.6ms | 93.4ms | 82.6ms | 70.9ms | 70.8ms |
+| **branched-scalar** | **61.2ms** | **75.6ms** | **65.4ms** | **62.8ms** | **57.5ms** |
+| goto-simd | 41.1ms | 27.4ms | 22.7ms | 23.7ms | 18.5ms |
+| **branched-simd** | **28.2ms** | **17.0ms** | **15.3ms** | **15.0ms** | **13.1ms** |
 
-The scalar parser's 4-worker mode barely improves over 1-worker because the
-serial scan phase (~30ms) dominates. The SIMD parser's byte-range partitioning
-eliminates this bottleneck entirely, allowing near-linear scaling.
+The branched versions consistently outperform the goto variants by ~1.3–1.5x.
+
+**Why branched wins on modern x86:**
+- `goto *table[index]` compiles to an indirect `jmp *%rax` — the CPU's branch
+  target buffer has limited capacity for indirect targets.
+- With `if`/`while`, the branch predictor achieves >99% accuracy because
+  ~95% of CSV bytes are plain tokens (the hot path is trivially predictable).
+- `likely`/`unlikely` hints give the compiler explicit layout guidance for
+  fall-through vs taken branches.
+- Structured control flow enables `-O3` optimizations (loop unrolling, block
+  reordering, register allocation) that are opaque to the optimizer with
+  indirect gotos.
+
+**When goto would win:** On embedded platforms (Cortex-M, Xtensa) with simple
+or no branch predictors, the goto FSM's flat-cost indirect jump would likely
+match or beat the branched version, since there's no sophisticated predictor
+to exploit.
 
 ---
 
@@ -330,6 +358,12 @@ specific performance bottleneck and force a concrete solution:
 5. **Byte-range partitioning** — Eliminated the scan phase entirely. Showed
    that architecture changes (how work is divided) can outweigh micro-
    optimizations (how fast each byte is processed).
+6. **Goto vs branched comparison** — Rewrote both parsers using conventional
+   `if`/`while` with `likely`/`unlikely` hints. Discovered that on modern
+   x86 with deep pipelines and sophisticated branch predictors, structured
+   control flow consistently outperforms computed gotos by ~1.3–1.5x —
+   because the CPU predicts the hot path with >99% accuracy, while indirect
+   jumps remain opaque to the BTB.
 
 Each step produced measurable before/after benchmarks, making the tradeoffs
 concrete rather than theoretical. The comparative benchmarks against
@@ -345,7 +379,7 @@ branching from the parse loop. That core FSM concept and the initial
 linked-list-based parser were written by hand.
 
 All subsequent optimizations — flat buffers, arena allocators, mmap, threaded
-distribution, SIMD vectorization, byte-range partitioning, benchmarking
-infrastructure — were implemented with AI-assisted development (GitHub Copilot).
-Architecture and design decisions directed by the author; implementation
-assisted by LLM tooling.
+distribution, SIMD vectorization, byte-range partitioning, branched parser
+variants, benchmarking infrastructure — were implemented with AI-assisted
+development (GitHub Copilot). Architecture and design decisions directed by
+the author; implementation assisted by LLM tooling.

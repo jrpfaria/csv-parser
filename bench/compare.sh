@@ -20,10 +20,14 @@ echo ""
 
 # --- Compile parsers ---
 echo "=== Compiling ==="
-gcc -O2 -DBENCHMARK -pthread -I"$ROOT_DIR/include" -o parser_cmp \
-    "$ROOT_DIR/src/parser.c" "$ROOT_DIR/src/list.c"
-gcc -O2 -DBENCHMARK -pthread -I"$ROOT_DIR/include" -o parser_simd_cmp \
-    "$ROOT_DIR/src/parser-simd.c" "$ROOT_DIR/src/list.c"
+gcc -O2 -DBENCHMARK -pthread -I"$ROOT_DIR/include" -o goto_scalar_cmp \
+    "$ROOT_DIR/src/goto/parser.c" "$ROOT_DIR/src/csv_common.c"
+gcc -O2 -DBENCHMARK -pthread -I"$ROOT_DIR/include" -o goto_simd_cmp \
+    "$ROOT_DIR/src/goto/parser-simd.c" "$ROOT_DIR/src/csv_common.c"
+gcc -O2 -DBENCHMARK -pthread -I"$ROOT_DIR/include" -o branched_scalar_cmp \
+    "$ROOT_DIR/src/branched/parser.c" "$ROOT_DIR/src/csv_common.c"
+gcc -O2 -DBENCHMARK -pthread -I"$ROOT_DIR/include" -o branched_simd_cmp \
+    "$ROOT_DIR/src/branched/parser-simd.c" "$ROOT_DIR/src/csv_common.c"
 gcc -O2 -o libcsv_bench libcsv_bench.c -lcsv
 echo "Done"
 echo ""
@@ -81,15 +85,21 @@ for f in bench_1k.csv bench_10k.csv bench_100k.csv; do
 
     printf "\n--- %s (%s rows, %s, %d runs) ---\n" "$f" "$rows" "$fsize" "$nruns"
 
-    # Our parser — single, 4 workers, 8 workers
-    run_bench "csv-parser (1 worker)"  "./parser_cmp '$f' 1" "$nruns" "$f"
-    run_bench "csv-parser (4 workers)" "./parser_cmp '$f' 4" "$nruns" "$f"
-    run_bench "csv-parser (8 workers)" "./parser_cmp '$f' 8" "$nruns" "$f"
+    # Goto parser variants
+    run_bench "goto-scalar (1w)"       "./goto_scalar_cmp '$f' 1" "$nruns" "$f"
+    run_bench "goto-scalar (4w)"       "./goto_scalar_cmp '$f' 4" "$nruns" "$f"
+    run_bench "goto-scalar (8w)"       "./goto_scalar_cmp '$f' 8" "$nruns" "$f"
+    run_bench "goto-simd (1w)"         "./goto_simd_cmp '$f' 1"   "$nruns" "$f"
+    run_bench "goto-simd (4w)"         "./goto_simd_cmp '$f' 4"   "$nruns" "$f"
+    run_bench "goto-simd (8w)"         "./goto_simd_cmp '$f' 8"   "$nruns" "$f"
 
-    # SIMD parser variants
-    run_bench "csv-parser-simd (1w)"   "./parser_simd_cmp '$f' 1" "$nruns" "$f"
-    run_bench "csv-parser-simd (4w)"   "./parser_simd_cmp '$f' 4" "$nruns" "$f"
-    run_bench "csv-parser-simd (8w)"   "./parser_simd_cmp '$f' 8" "$nruns" "$f"
+    # Branched parser variants
+    run_bench "branched-scalar (1w)"   "./branched_scalar_cmp '$f' 1" "$nruns" "$f"
+    run_bench "branched-scalar (4w)"   "./branched_scalar_cmp '$f' 4" "$nruns" "$f"
+    run_bench "branched-scalar (8w)"   "./branched_scalar_cmp '$f' 8" "$nruns" "$f"
+    run_bench "branched-simd (1w)"     "./branched_simd_cmp '$f' 1"   "$nruns" "$f"
+    run_bench "branched-simd (4w)"     "./branched_simd_cmp '$f' 4"   "$nruns" "$f"
+    run_bench "branched-simd (8w)"     "./branched_simd_cmp '$f' 8"   "$nruns" "$f"
 
     # libcsv (C library)
     run_bench "libcsv (C)"             "./libcsv_bench '$f'" "$nruns" "$f"
@@ -192,7 +202,9 @@ with open(report_path, "w") as f:
 
     f.write("=" * 80 + "\n")
     f.write("  Notes:\n")
-    f.write("  - csv-parser: custom goto-FSM + mmap + pthreads (this project)\n")
+    f.write("  - goto-*: computed goto FSM + mmap + pthreads\n")
+    f.write("  - branched-*: if/while + likely/unlikely + mmap + pthreads\n")
+    f.write("  - *-simd: SSE2-accelerated parsing (16 bytes/cycle)\n")
     f.write("  - libcsv: C library (libcsv3), fread-based, single-threaded\n")
     f.write("  - xsv: BurntSushi's Rust CSV toolkit (single-threaded)\n")
     f.write("  - mlr: Miller, Go-based CSV processor\n")
@@ -206,4 +218,4 @@ with open(report_path) as f:
     print(f.read())
 PYEOF
 
-rm -f parser_cmp libcsv_bench
+rm -f goto_scalar_cmp goto_simd_cmp branched_scalar_cmp branched_simd_cmp libcsv_bench

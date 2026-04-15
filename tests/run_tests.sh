@@ -1,5 +1,5 @@
 #!/bin/bash
-# Test suite: validates parse accuracy for both scalar and SIMD parsers
+# Test suite: validates parse accuracy for all 4 parser variants
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -10,10 +10,14 @@ FAIL=0
 TOTAL=0
 
 echo "=== Compiling test binaries ==="
-gcc -pthread -I"$ROOT_DIR/include" -o test_parser \
-    "$ROOT_DIR/src/parser.c" "$ROOT_DIR/src/list.c"
-gcc -pthread -I"$ROOT_DIR/include" -o test_parser_simd \
-    "$ROOT_DIR/src/parser-simd.c" "$ROOT_DIR/src/list.c"
+gcc -pthread -I"$ROOT_DIR/include" -o test_goto_scalar \
+    "$ROOT_DIR/src/goto/parser.c" "$ROOT_DIR/src/csv_common.c"
+gcc -pthread -I"$ROOT_DIR/include" -o test_goto_simd \
+    "$ROOT_DIR/src/goto/parser-simd.c" "$ROOT_DIR/src/csv_common.c"
+gcc -pthread -I"$ROOT_DIR/include" -o test_branched_scalar \
+    "$ROOT_DIR/src/branched/parser.c" "$ROOT_DIR/src/csv_common.c"
+gcc -pthread -I"$ROOT_DIR/include" -o test_branched_simd \
+    "$ROOT_DIR/src/branched/parser-simd.c" "$ROOT_DIR/src/csv_common.c"
 
 run_test() {
     local name="$1"
@@ -79,14 +83,14 @@ plain,99
 EOF
 
 # Scalar parser doesn't capture quoted content (known limitation)
-cat > expected_qualifiers_scalar.txt << 'EOF'
+cat > expected_qualifiers_goto_scalar.txt << 'EOF'
   row 0 (2 cols): Name Value
   row 1 (2 cols):  42
   row 2 (2 cols): plain 99
 EOF
 
-# SIMD parser correctly handles RFC 4180 quoting
-cat > expected_qualifiers_simd.txt << 'EOF'
+# All other parsers correctly handle RFC 4180 quoting
+cat > expected_qualifiers_rfc4180.txt << 'EOF'
   row 0 (2 cols): Name Value
   row 1 (2 cols): hello,world 42
   row 2 (2 cols): plain 99
@@ -224,20 +228,20 @@ sys.stdout.buffer.write(b'a,b,c\n')
 python3 -c "print(','.join(str(i) for i in range(500)))" > test_bad_500cols.csv
 
 echo ""
-echo "=== Running tests (both parsers, all modes) ==="
+echo "=== Running tests (all parsers, all modes) ==="
 
-for parser_bin in test_parser test_parser_simd; do
-    parser_label="scalar"
-    [ "$parser_bin" = "test_parser_simd" ] && parser_label="simd"
+for parser_bin in test_goto_scalar test_goto_simd test_branched_scalar test_branched_simd; do
+    parser_label="${parser_bin#test_}"
+
+    # Only goto_scalar strips quoted content
+    qual_expected="expected_qualifiers_rfc4180.txt"
+    [ "$parser_bin" = "test_goto_scalar" ] && qual_expected="expected_qualifiers_goto_scalar.txt"
 
     for mode_workers in 1 2 4 6 8; do
-        mode_name="single"
-        [ "$mode_workers" = "2" ] && mode_name="dist-as-worker"
-        [ "$mode_workers" -ge "3" ] && mode_name="dist+slaves($mode_workers)"
-        printf "\n--- [%s] Mode: %s (workers=%d) ---\n" "$parser_label" "$mode_name" "$mode_workers"
+        printf "\n--- [%s] workers=%d ---\n" "$parser_label" "$mode_workers"
 
         run_test "simple CSV"           test_simple.csv      "$mode_workers" expected_simple.txt      "$parser_bin"
-        run_test "qualifiers"           test_qualifiers.csv  "$mode_workers" "expected_qualifiers_${parser_label}.txt" "$parser_bin"
+        run_test "qualifiers"           test_qualifiers.csv  "$mode_workers" "$qual_expected"         "$parser_bin"
         run_test "single column"        test_single_col.csv  "$mode_workers" expected_single_col.txt  "$parser_bin"
         run_test "no trailing newline"  test_no_trail.csv    "$mode_workers" expected_no_trail.txt    "$parser_bin"
         run_test "empty fields"         test_empty.csv       "$mode_workers" expected_empty.txt       "$parser_bin"
@@ -261,9 +265,8 @@ done
 # --- Large file: validate row count across modes ---
 echo ""
 echo "--- Row count validation (bench_1k.csv, 1000 rows x 10 cols) ---"
-for parser_bin in test_parser test_parser_simd; do
-    parser_label="scalar"
-    [ "$parser_bin" = "test_parser_simd" ] && parser_label="simd"
+for parser_bin in test_goto_scalar test_goto_simd test_branched_scalar test_branched_simd; do
+    parser_label="${parser_bin#test_}"
 
     for mode_workers in 1 2 4 6 8; do
         actual_rows=$("./$parser_bin" bench_1k.csv "$mode_workers" 2>&1 | head -1 | grep -oP '\d+(?= rows)')
@@ -279,7 +282,8 @@ for parser_bin in test_parser test_parser_simd; do
 done
 
 # Cleanup
-rm -f test_parser test_parser_simd test_*.csv expected_*.txt bench_*.csv
+rm -f test_goto_scalar test_goto_simd test_branched_scalar test_branched_simd
+rm -f test_*.csv expected_*.txt bench_*.csv
 
 echo ""
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="
