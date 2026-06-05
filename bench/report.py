@@ -85,7 +85,6 @@ def file_size_label(filename):
 
 
 WORKER_CONFIGS = [1, 2, 4, 6, 8]
-PARSERS = ["scalar", "simd"]
 WORKER_LABELS = {
     1: "Single",
     2: "Dist+W(2)",
@@ -108,6 +107,7 @@ def generate_text_report(meta, records, out_path):
         by_file_parser = defaultdict(lambda: defaultdict(list))
         for r in records:
             by_file_parser[r["file"]][r["parser"]].append(r)
+        parser_labels = sorted({r["parser"] for r in records})
 
         # Summary table — best, for each parser
         col_w = 12
@@ -115,7 +115,7 @@ def generate_text_report(meta, records, out_path):
         hdr = f"{'File':<16}" + "".join(f"{l:>{col_w}}" for l in hdr_labels)
         sep = "-" * len(hdr)
 
-        for plabel in PARSERS:
+        for plabel in parser_labels:
             pname = plabel.upper()
             f.write(f"BEST wall-clock time — {pname} parser (seconds)\n")
             f.write(sep + "\n")
@@ -136,25 +136,32 @@ def generate_text_report(meta, records, out_path):
                 f.write("\n")
             f.write(sep + "\n\n")
 
-        # Speedup table — scalar vs simd at each config
-        f.write("SIMD SPEEDUP vs SCALAR (best)\n")
-        f.write(sep + "\n")
-        f.write(hdr + "\n")
-        f.write(sep + "\n")
-        for fname in ["bench_100.csv", "bench_1k.csv", "bench_10k.csv", "bench_100k.csv"]:
-            scalar_data = {r["workers"]: r for r in by_file_parser.get(fname, {}).get("scalar", [])}
-            simd_data = {r["workers"]: r for r in by_file_parser.get(fname, {}).get("simd", [])}
-            if not scalar_data or not simd_data:
+        # Speedup table — SIMD vs scalar, grouped by approach
+        approaches = sorted({p.rsplit("-", 1)[0] for p in parser_labels if "-" in p})
+        for approach in approaches:
+            scalar_label = f"{approach}-scalar"
+            simd_label = f"{approach}-simd"
+            if scalar_label not in parser_labels or simd_label not in parser_labels:
                 continue
-            f.write(f"{file_size_label(fname):<16}")
-            for w in WORKER_CONFIGS:
-                if w in scalar_data and w in simd_data and simd_data[w]["best_wall_s"] > 0:
-                    sp = scalar_data[w]["best_wall_s"] / simd_data[w]["best_wall_s"]
-                    f.write(f"{sp:>{col_w - 1}.2f}x")
-                else:
-                    f.write(f"{'n/a':>{col_w}}")
-            f.write("\n")
-        f.write(sep + "\n\n")
+
+            f.write(f"SIMD SPEEDUP vs SCALAR (best) — {approach.upper()}\n")
+            f.write(sep + "\n")
+            f.write(hdr + "\n")
+            f.write(sep + "\n")
+            for fname in ["bench_100.csv", "bench_1k.csv", "bench_10k.csv", "bench_100k.csv"]:
+                scalar_data = {r["workers"]: r for r in by_file_parser.get(fname, {}).get(scalar_label, [])}
+                simd_data = {r["workers"]: r for r in by_file_parser.get(fname, {}).get(simd_label, [])}
+                if not scalar_data or not simd_data:
+                    continue
+                f.write(f"{file_size_label(fname):<16}")
+                for w in WORKER_CONFIGS:
+                    if w in scalar_data and w in simd_data and simd_data[w]["best_wall_s"] > 0:
+                        sp = scalar_data[w]["best_wall_s"] / simd_data[w]["best_wall_s"]
+                        f.write(f"{sp:>{col_w - 1}.2f}x")
+                    else:
+                        f.write(f"{'n/a':>{col_w}}")
+                f.write("\n")
+            f.write(sep + "\n\n")
 
         # Per-phase breakdown
         f.write("PHASE BREAKDOWN (seconds) — from internal timing\n")
@@ -259,6 +266,18 @@ def generate_pdf_report(meta, records, out_path):
     workers = sorted({r["workers"] for r in records})
     parsers_found = sorted({r["parser"] for r in records})
 
+    def scalar_baseline_record(fname):
+        for cand in ["control-scalar", "fsm-scalar", "lut-scalar", "scalar"]:
+            rec = idx.get((fname, cand), {}).get(1)
+            if rec:
+                return rec
+        for plabel in parsers_found:
+            if plabel.endswith("scalar"):
+                rec = idx.get((fname, plabel), {}).get(1)
+                if rec:
+                    return rec
+        return None
+
     with PdfPages(out_path) as pdf:
         # --- Page 1: Overall wall-clock speedup (both parsers) ---
         fig, (ax_best, ax_avg) = plt.subplots(1, 2, figsize=(14, 6))
@@ -276,9 +295,8 @@ def generate_pdf_report(meta, records, out_path):
             ax.axhline(y=1.0, color="gray", linestyle="--", linewidth=0.8, alpha=0.6)
 
             for fname in FILES:
-                # Use scalar single-threaded as the baseline for both
-                base = idx.get((fname, "scalar"), {}).get(1, {})
-                base_val = base.get(metric, 0) if isinstance(base, dict) else 0
+                base = scalar_baseline_record(fname)
+                base_val = base.get(metric, 0) if base else 0
                 if base_val <= 0:
                     continue
                 for plabel in parsers_found:
@@ -315,7 +333,8 @@ def generate_pdf_report(meta, records, out_path):
             ax.axhline(y=1.0, color="gray", linestyle="--", linewidth=0.8, alpha=0.6)
 
             for fname in FILES:
-                base_val = idx.get((fname, "scalar"), {}).get(1, {}).get(phase, 0)
+                base = scalar_baseline_record(fname)
+                base_val = base.get(phase, 0) if base else 0
                 if base_val <= 0:
                     continue
                 for plabel in parsers_found:

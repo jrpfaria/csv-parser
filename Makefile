@@ -1,31 +1,42 @@
 CC = gcc
 CFLAGS = -I include -pthread -O3
 COMMON = src/csv_common.c
+LUT_COMMON = src/csv_lut.c
 HDRS = include/csv_common.h
 
-# Goto-based parsers
-SRC_GOTO_SCALAR = src/goto/parser.c $(COMMON)
-SRC_GOTO_SIMD   = src/goto/parser-simd.c $(COMMON)
+# FSM parsers (computed goto)
+SRC_FSM_SCALAR = src/fsm/parser.c $(COMMON)
+SRC_FSM_SIMD   = src/fsm/parser-simd.c $(COMMON)
 
-# Branched parsers (if/while + likely/unlikely)
-SRC_BR_SCALAR   = src/branched/parser.c $(COMMON)
-SRC_BR_SIMD     = src/branched/parser-simd.c $(COMMON)
+# Control parsers (if/while + likely/unlikely)
+SRC_CTRL_SCALAR = src/control/parser.c $(COMMON)
+SRC_CTRL_SIMD   = src/control/parser-simd.c $(COMMON)
+
+# LUT parsers (table-driven classification)
+SRC_LUT_SCALAR = src/lut/parser.c $(COMMON) $(LUT_COMMON)
+SRC_LUT_SIMD   = src/lut/parser-simd.c $(COMMON) $(LUT_COMMON)
 
 .PHONY: all clean test csv bench report graph compare
 
-all: goto-parser goto-parser-simd branched-parser branched-parser-simd
+all: fsm-parser fsm-parser-simd control-parser control-parser-simd lut-parser lut-parser-simd
 
-goto-parser: $(SRC_GOTO_SCALAR) $(HDRS)
-	$(CC) $(CFLAGS) -o $@ $(SRC_GOTO_SCALAR)
+fsm-parser: $(SRC_FSM_SCALAR) $(HDRS)
+	$(CC) $(CFLAGS) -o $@ $(SRC_FSM_SCALAR)
 
-goto-parser-simd: $(SRC_GOTO_SIMD) $(HDRS)
-	$(CC) $(CFLAGS) -o $@ $(SRC_GOTO_SIMD)
+fsm-parser-simd: $(SRC_FSM_SIMD) $(HDRS)
+	$(CC) $(CFLAGS) -o $@ $(SRC_FSM_SIMD)
 
-branched-parser: $(SRC_BR_SCALAR) $(HDRS)
-	$(CC) $(CFLAGS) -o $@ $(SRC_BR_SCALAR)
+control-parser: $(SRC_CTRL_SCALAR) $(HDRS)
+	$(CC) $(CFLAGS) -o $@ $(SRC_CTRL_SCALAR)
 
-branched-parser-simd: $(SRC_BR_SIMD) $(HDRS)
-	$(CC) $(CFLAGS) -o $@ $(SRC_BR_SIMD)
+control-parser-simd: $(SRC_CTRL_SIMD) $(HDRS)
+	$(CC) $(CFLAGS) -o $@ $(SRC_CTRL_SIMD)
+
+lut-parser: $(SRC_LUT_SCALAR) $(HDRS)
+	$(CC) $(CFLAGS) -o $@ $(SRC_LUT_SCALAR)
+
+lut-parser-simd: $(SRC_LUT_SIMD) $(HDRS)
+	$(CC) $(CFLAGS) -o $@ $(SRC_LUT_SIMD)
 
 csv:
 	python3 bench/gen_csv.py csv/
@@ -46,7 +57,7 @@ compare:
 	bash bench/compare.sh
 
 clean:
-	rm -f goto-parser goto-parser-simd branched-parser branched-parser-simd
+	rm -f fsm-parser fsm-parser-simd control-parser control-parser-simd lut-parser lut-parser-simd
 	rm -f bench/*_bench bench/*_timing bench/*_cmp bench/libcsv_bench
 	rm -f bench/bench_*.csv bench/bench_results.txt bench/bench_report.txt
 	rm -f bench/bench_report.csv bench/bench_phases.csv bench/bench_report.pdf

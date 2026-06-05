@@ -20,14 +20,18 @@ echo ""
 
 # --- Compile parsers ---
 echo "=== Compiling ==="
-gcc -O2 -DBENCHMARK -pthread -I"$ROOT_DIR/include" -o goto_scalar_cmp \
-    "$ROOT_DIR/src/goto/parser.c" "$ROOT_DIR/src/csv_common.c"
-gcc -O2 -DBENCHMARK -pthread -I"$ROOT_DIR/include" -o goto_simd_cmp \
-    "$ROOT_DIR/src/goto/parser-simd.c" "$ROOT_DIR/src/csv_common.c"
-gcc -O2 -DBENCHMARK -pthread -I"$ROOT_DIR/include" -o branched_scalar_cmp \
-    "$ROOT_DIR/src/branched/parser.c" "$ROOT_DIR/src/csv_common.c"
-gcc -O2 -DBENCHMARK -pthread -I"$ROOT_DIR/include" -o branched_simd_cmp \
-    "$ROOT_DIR/src/branched/parser-simd.c" "$ROOT_DIR/src/csv_common.c"
+gcc -O2 -DBENCHMARK -pthread -I"$ROOT_DIR/include" -o fsm_scalar_cmp \
+    "$ROOT_DIR/src/fsm/parser.c" "$ROOT_DIR/src/csv_common.c"
+gcc -O2 -DBENCHMARK -pthread -I"$ROOT_DIR/include" -o fsm_simd_cmp \
+    "$ROOT_DIR/src/fsm/parser-simd.c" "$ROOT_DIR/src/csv_common.c"
+gcc -O2 -DBENCHMARK -pthread -I"$ROOT_DIR/include" -o control_scalar_cmp \
+    "$ROOT_DIR/src/control/parser.c" "$ROOT_DIR/src/csv_common.c"
+gcc -O2 -DBENCHMARK -pthread -I"$ROOT_DIR/include" -o control_simd_cmp \
+    "$ROOT_DIR/src/control/parser-simd.c" "$ROOT_DIR/src/csv_common.c"
+gcc -O2 -DBENCHMARK -pthread -I"$ROOT_DIR/include" -o lut_scalar_cmp \
+    "$ROOT_DIR/src/lut/parser.c" "$ROOT_DIR/src/csv_common.c" "$ROOT_DIR/src/csv_lut.c"
+gcc -O2 -DBENCHMARK -pthread -I"$ROOT_DIR/include" -o lut_simd_cmp \
+    "$ROOT_DIR/src/lut/parser-simd.c" "$ROOT_DIR/src/csv_common.c" "$ROOT_DIR/src/csv_lut.c"
 gcc -O2 -o libcsv_bench libcsv_bench.c -lcsv
 echo "Done"
 echo ""
@@ -85,21 +89,29 @@ for f in bench_1k.csv bench_10k.csv bench_100k.csv; do
 
     printf "\n--- %s (%s rows, %s, %d runs) ---\n" "$f" "$rows" "$fsize" "$nruns"
 
-    # Goto parser variants
-    run_bench "goto-scalar (1w)"       "./goto_scalar_cmp '$f' 1" "$nruns" "$f"
-    run_bench "goto-scalar (4w)"       "./goto_scalar_cmp '$f' 4" "$nruns" "$f"
-    run_bench "goto-scalar (8w)"       "./goto_scalar_cmp '$f' 8" "$nruns" "$f"
-    run_bench "goto-simd (1w)"         "./goto_simd_cmp '$f' 1"   "$nruns" "$f"
-    run_bench "goto-simd (4w)"         "./goto_simd_cmp '$f' 4"   "$nruns" "$f"
-    run_bench "goto-simd (8w)"         "./goto_simd_cmp '$f' 8"   "$nruns" "$f"
+    # FSM parser variants
+    run_bench "fsm-scalar (1w)"        "./fsm_scalar_cmp '$f' 1" "$nruns" "$f"
+    run_bench "fsm-scalar (4w)"        "./fsm_scalar_cmp '$f' 4" "$nruns" "$f"
+    run_bench "fsm-scalar (8w)"        "./fsm_scalar_cmp '$f' 8" "$nruns" "$f"
+    run_bench "fsm-simd (1w)"          "./fsm_simd_cmp '$f' 1"   "$nruns" "$f"
+    run_bench "fsm-simd (4w)"          "./fsm_simd_cmp '$f' 4"   "$nruns" "$f"
+    run_bench "fsm-simd (8w)"          "./fsm_simd_cmp '$f' 8"   "$nruns" "$f"
 
-    # Branched parser variants
-    run_bench "branched-scalar (1w)"   "./branched_scalar_cmp '$f' 1" "$nruns" "$f"
-    run_bench "branched-scalar (4w)"   "./branched_scalar_cmp '$f' 4" "$nruns" "$f"
-    run_bench "branched-scalar (8w)"   "./branched_scalar_cmp '$f' 8" "$nruns" "$f"
-    run_bench "branched-simd (1w)"     "./branched_simd_cmp '$f' 1"   "$nruns" "$f"
-    run_bench "branched-simd (4w)"     "./branched_simd_cmp '$f' 4"   "$nruns" "$f"
-    run_bench "branched-simd (8w)"     "./branched_simd_cmp '$f' 8"   "$nruns" "$f"
+    # Control parser variants
+    run_bench "control-scalar (1w)"    "./control_scalar_cmp '$f' 1" "$nruns" "$f"
+    run_bench "control-scalar (4w)"    "./control_scalar_cmp '$f' 4" "$nruns" "$f"
+    run_bench "control-scalar (8w)"    "./control_scalar_cmp '$f' 8" "$nruns" "$f"
+    run_bench "control-simd (1w)"      "./control_simd_cmp '$f' 1"   "$nruns" "$f"
+    run_bench "control-simd (4w)"      "./control_simd_cmp '$f' 4"   "$nruns" "$f"
+    run_bench "control-simd (8w)"      "./control_simd_cmp '$f' 8"   "$nruns" "$f"
+
+    # LUT parser variants
+    run_bench "lut-scalar (1w)"        "./lut_scalar_cmp '$f' 1" "$nruns" "$f"
+    run_bench "lut-scalar (4w)"        "./lut_scalar_cmp '$f' 4" "$nruns" "$f"
+    run_bench "lut-scalar (8w)"        "./lut_scalar_cmp '$f' 8" "$nruns" "$f"
+    run_bench "lut-simd (1w)"          "./lut_simd_cmp '$f' 1"   "$nruns" "$f"
+    run_bench "lut-simd (4w)"          "./lut_simd_cmp '$f' 4"   "$nruns" "$f"
+    run_bench "lut-simd (8w)"          "./lut_simd_cmp '$f' 8"   "$nruns" "$f"
 
     # libcsv (C library)
     run_bench "libcsv (C)"             "./libcsv_bench '$f'" "$nruns" "$f"
@@ -202,8 +214,9 @@ with open(report_path, "w") as f:
 
     f.write("=" * 80 + "\n")
     f.write("  Notes:\n")
-    f.write("  - goto-*: computed goto FSM + mmap + pthreads\n")
-    f.write("  - branched-*: if/while + likely/unlikely + mmap + pthreads\n")
+    f.write("  - fsm-*: computed goto FSM + mmap + pthreads\n")
+    f.write("  - control-*: if/while + likely/unlikely + mmap + pthreads\n")
+    f.write("  - lut-*: lookup-table class dispatch + mmap + pthreads\n")
     f.write("  - *-simd: SSE2-accelerated parsing (16 bytes/cycle)\n")
     f.write("  - libcsv: C library (libcsv3), fread-based, single-threaded\n")
     f.write("  - xsv: BurntSushi's Rust CSV toolkit (single-threaded)\n")
@@ -218,4 +231,5 @@ with open(report_path) as f:
     print(f.read())
 PYEOF
 
-rm -f goto_scalar_cmp goto_simd_cmp branched_scalar_cmp branched_simd_cmp libcsv_bench
+rm -f fsm_scalar_cmp fsm_simd_cmp control_scalar_cmp control_simd_cmp
+rm -f lut_scalar_cmp lut_simd_cmp libcsv_bench

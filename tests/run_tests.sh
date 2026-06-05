@@ -10,14 +10,18 @@ FAIL=0
 TOTAL=0
 
 echo "=== Compiling test binaries ==="
-gcc -pthread -I"$ROOT_DIR/include" -o test_goto_scalar \
-    "$ROOT_DIR/src/goto/parser.c" "$ROOT_DIR/src/csv_common.c"
-gcc -pthread -I"$ROOT_DIR/include" -o test_goto_simd \
-    "$ROOT_DIR/src/goto/parser-simd.c" "$ROOT_DIR/src/csv_common.c"
-gcc -pthread -I"$ROOT_DIR/include" -o test_branched_scalar \
-    "$ROOT_DIR/src/branched/parser.c" "$ROOT_DIR/src/csv_common.c"
-gcc -pthread -I"$ROOT_DIR/include" -o test_branched_simd \
-    "$ROOT_DIR/src/branched/parser-simd.c" "$ROOT_DIR/src/csv_common.c"
+gcc -pthread -I"$ROOT_DIR/include" -o test_fsm_scalar \
+    "$ROOT_DIR/src/fsm/parser.c" "$ROOT_DIR/src/csv_common.c"
+gcc -pthread -I"$ROOT_DIR/include" -o test_fsm_simd \
+    "$ROOT_DIR/src/fsm/parser-simd.c" "$ROOT_DIR/src/csv_common.c"
+gcc -pthread -I"$ROOT_DIR/include" -o test_control_scalar \
+    "$ROOT_DIR/src/control/parser.c" "$ROOT_DIR/src/csv_common.c"
+gcc -pthread -I"$ROOT_DIR/include" -o test_control_simd \
+    "$ROOT_DIR/src/control/parser-simd.c" "$ROOT_DIR/src/csv_common.c"
+gcc -pthread -I"$ROOT_DIR/include" -o test_lut_scalar \
+    "$ROOT_DIR/src/lut/parser.c" "$ROOT_DIR/src/csv_common.c" "$ROOT_DIR/src/csv_lut.c"
+gcc -pthread -I"$ROOT_DIR/include" -o test_lut_simd \
+    "$ROOT_DIR/src/lut/parser-simd.c" "$ROOT_DIR/src/csv_common.c" "$ROOT_DIR/src/csv_lut.c"
 
 run_test() {
     local name="$1"
@@ -83,7 +87,7 @@ plain,99
 EOF
 
 # Scalar parser doesn't capture quoted content (known limitation)
-cat > expected_qualifiers_goto_scalar.txt << 'EOF'
+cat > expected_qualifiers_fsm_scalar.txt << 'EOF'
   row 0 (2 cols): Name Value
   row 1 (2 cols):  42
   row 2 (2 cols): plain 99
@@ -230,12 +234,12 @@ python3 -c "print(','.join(str(i) for i in range(500)))" > test_bad_500cols.csv
 echo ""
 echo "=== Running tests (all parsers, all modes) ==="
 
-for parser_bin in test_goto_scalar test_goto_simd test_branched_scalar test_branched_simd; do
+for parser_bin in test_fsm_scalar test_fsm_simd test_control_scalar test_control_simd test_lut_scalar test_lut_simd; do
     parser_label="${parser_bin#test_}"
 
-    # Only goto_scalar strips quoted content
+    # Only fsm_scalar strips quoted content
     qual_expected="expected_qualifiers_rfc4180.txt"
-    [ "$parser_bin" = "test_goto_scalar" ] && qual_expected="expected_qualifiers_goto_scalar.txt"
+    [ "$parser_bin" = "test_fsm_scalar" ] && qual_expected="expected_qualifiers_fsm_scalar.txt"
 
     for mode_workers in 1 2 4 6 8; do
         printf "\n--- [%s] workers=%d ---\n" "$parser_label" "$mode_workers"
@@ -265,7 +269,7 @@ done
 # --- Large file: validate row count across modes ---
 echo ""
 echo "--- Row count validation (bench_1k.csv, 1000 rows x 10 cols) ---"
-for parser_bin in test_goto_scalar test_goto_simd test_branched_scalar test_branched_simd; do
+for parser_bin in test_fsm_scalar test_fsm_simd test_control_scalar test_control_simd test_lut_scalar test_lut_simd; do
     parser_label="${parser_bin#test_}"
 
     for mode_workers in 1 2 4 6 8; do
@@ -282,7 +286,8 @@ for parser_bin in test_goto_scalar test_goto_simd test_branched_scalar test_bran
 done
 
 # Cleanup
-rm -f test_goto_scalar test_goto_simd test_branched_scalar test_branched_simd
+rm -f test_fsm_scalar test_fsm_simd test_control_scalar test_control_simd
+rm -f test_lut_scalar test_lut_simd
 rm -f test_*.csv expected_*.txt bench_*.csv
 
 echo ""

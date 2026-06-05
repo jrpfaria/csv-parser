@@ -18,22 +18,31 @@ python3 gen_csv.py
 
 echo ""
 echo "=== Compiling ==="
-gcc -O2 -DBENCHMARK -pthread -I"$ROOT_DIR/include" -o goto_scalar_bench \
-    "$ROOT_DIR/src/goto/parser.c" "$ROOT_DIR/src/csv_common.c"
-gcc -O2 -DBENCHMARK -pthread -I"$ROOT_DIR/include" -o goto_simd_bench \
-    "$ROOT_DIR/src/goto/parser-simd.c" "$ROOT_DIR/src/csv_common.c"
-gcc -O2 -DBENCHMARK -pthread -I"$ROOT_DIR/include" -o branched_scalar_bench \
-    "$ROOT_DIR/src/branched/parser.c" "$ROOT_DIR/src/csv_common.c"
-gcc -O2 -DBENCHMARK -pthread -I"$ROOT_DIR/include" -o branched_simd_bench \
-    "$ROOT_DIR/src/branched/parser-simd.c" "$ROOT_DIR/src/csv_common.c"
-gcc -O2 -pthread -I"$ROOT_DIR/include" -o goto_scalar_timing \
-    "$ROOT_DIR/src/goto/parser.c" "$ROOT_DIR/src/csv_common.c"
-gcc -O2 -pthread -I"$ROOT_DIR/include" -o goto_simd_timing \
-    "$ROOT_DIR/src/goto/parser-simd.c" "$ROOT_DIR/src/csv_common.c"
-gcc -O2 -pthread -I"$ROOT_DIR/include" -o branched_scalar_timing \
-    "$ROOT_DIR/src/branched/parser.c" "$ROOT_DIR/src/csv_common.c"
-gcc -O2 -pthread -I"$ROOT_DIR/include" -o branched_simd_timing \
-    "$ROOT_DIR/src/branched/parser-simd.c" "$ROOT_DIR/src/csv_common.c"
+gcc -O2 -DBENCHMARK -pthread -I"$ROOT_DIR/include" -o fsm_scalar_bench \
+    "$ROOT_DIR/src/fsm/parser.c" "$ROOT_DIR/src/csv_common.c"
+gcc -O2 -DBENCHMARK -pthread -I"$ROOT_DIR/include" -o fsm_simd_bench \
+    "$ROOT_DIR/src/fsm/parser-simd.c" "$ROOT_DIR/src/csv_common.c"
+gcc -O2 -DBENCHMARK -pthread -I"$ROOT_DIR/include" -o control_scalar_bench \
+    "$ROOT_DIR/src/control/parser.c" "$ROOT_DIR/src/csv_common.c"
+gcc -O2 -DBENCHMARK -pthread -I"$ROOT_DIR/include" -o control_simd_bench \
+    "$ROOT_DIR/src/control/parser-simd.c" "$ROOT_DIR/src/csv_common.c"
+gcc -O2 -DBENCHMARK -pthread -I"$ROOT_DIR/include" -o lut_scalar_bench \
+    "$ROOT_DIR/src/lut/parser.c" "$ROOT_DIR/src/csv_common.c" "$ROOT_DIR/src/csv_lut.c"
+gcc -O2 -DBENCHMARK -pthread -I"$ROOT_DIR/include" -o lut_simd_bench \
+    "$ROOT_DIR/src/lut/parser-simd.c" "$ROOT_DIR/src/csv_common.c" "$ROOT_DIR/src/csv_lut.c"
+
+gcc -O2 -pthread -I"$ROOT_DIR/include" -o fsm_scalar_timing \
+    "$ROOT_DIR/src/fsm/parser.c" "$ROOT_DIR/src/csv_common.c"
+gcc -O2 -pthread -I"$ROOT_DIR/include" -o fsm_simd_timing \
+    "$ROOT_DIR/src/fsm/parser-simd.c" "$ROOT_DIR/src/csv_common.c"
+gcc -O2 -pthread -I"$ROOT_DIR/include" -o control_scalar_timing \
+    "$ROOT_DIR/src/control/parser.c" "$ROOT_DIR/src/csv_common.c"
+gcc -O2 -pthread -I"$ROOT_DIR/include" -o control_simd_timing \
+    "$ROOT_DIR/src/control/parser-simd.c" "$ROOT_DIR/src/csv_common.c"
+gcc -O2 -pthread -I"$ROOT_DIR/include" -o lut_scalar_timing \
+    "$ROOT_DIR/src/lut/parser.c" "$ROOT_DIR/src/csv_common.c" "$ROOT_DIR/src/csv_lut.c"
+gcc -O2 -pthread -I"$ROOT_DIR/include" -o lut_simd_timing \
+    "$ROOT_DIR/src/lut/parser-simd.c" "$ROOT_DIR/src/csv_common.c" "$ROOT_DIR/src/csv_lut.c"
 echo "Done"
 
 # Clear results file
@@ -61,7 +70,13 @@ for f in bench_100.csv bench_1k.csv bench_10k.csv bench_100k.csv; do
 
     printf "\n--- %s (%s lines, %s) — %d runs ---\n" "$f" "$rows" "$size" "$NRUNS"
 
-    for parser_info in "goto-scalar:goto_scalar_bench:goto_scalar_timing" "goto-simd:goto_simd_bench:goto_simd_timing" "branched-scalar:branched_scalar_bench:branched_scalar_timing" "branched-simd:branched_simd_bench:branched_simd_timing"; do
+    for parser_info in \
+        "fsm-scalar:fsm_scalar_bench:fsm_scalar_timing" \
+        "fsm-simd:fsm_simd_bench:fsm_simd_timing" \
+        "control-scalar:control_scalar_bench:control_scalar_timing" \
+        "control-simd:control_simd_bench:control_simd_timing" \
+        "lut-scalar:lut_scalar_bench:lut_scalar_timing" \
+        "lut-simd:lut_simd_bench:lut_simd_timing"; do
         IFS=: read -r plabel pbench ptiming <<< "$parser_info"
 
         for w in 1 2 4 6 8; do
@@ -91,4 +106,5 @@ done
 
 echo ""
 echo "Results written to: $RESULTS_FILE"
-rm -f goto_scalar_timing goto_simd_timing branched_scalar_timing branched_simd_timing
+rm -f fsm_scalar_timing fsm_simd_timing control_scalar_timing control_simd_timing
+rm -f lut_scalar_timing lut_simd_timing
